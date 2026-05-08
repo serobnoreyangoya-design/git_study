@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ticgit.dev/schema/v1.json",
+  "title": "TicGit machine output schema v1",
+  "description": "Stable JSON shapes emitted by TicGit v1 machine-readable commands. `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ticket"
+    },
+    {
+      "$ref": "#/$defs/ticketList"
+    }
+  ],
+  "$defs": {
+    "ticketList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ticket"
+      }
+    },
+    "ticket": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "description",
+        "status",
+        "state",
+        "assigned",
+        "points",
+        "milestone",
+        "tags",
+        "meta",
+        "comments",
+        "created_at",
+        "created_by"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "open",
+            "closed"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "new",
+            "assigned",
+            "in-progress",
+            "blocked",
+            "review",
+            "resolved",
+            "wontfix",
+            "duplicate",
+            "invalid"
+          ]
+        },
+        "assigned": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "points": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "milestone": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "meta": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "comments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/comment"
+          }
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "created_by": {
+          "type": "string"
+        }
+      }
+    },
+    "comment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "author",
+        "at",
+        "body"
+      ],
+      "properties": {
+        "author": {
+          "type": "string"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "body": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
