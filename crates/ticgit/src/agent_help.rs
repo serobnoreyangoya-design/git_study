@@ -5,7 +5,7 @@ description: Use TicGit (`ti`) to track local-first, Git-native tickets in this 
 
 # TicGit Agent Guide
 
-TicGit stores tickets as Git metadata, so ticket changes travel with the repository through `ti sync`. Prefer machine-readable output (`--json`) when reading ticket data for automation.
+TicGit stores tickets as Git metadata, so ticket changes travel with the repository through `ti sync`. Prefer Markdown output (`--markdown`) when reading ticket data for agent workflows; it includes the ticket data plus suggested next commands.
 
 ## Core Workflow
 
