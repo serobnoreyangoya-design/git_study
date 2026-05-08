@@ -1,6 +1,7 @@
-//! Terminal output: tables, single-ticket details, and JSON.
+//! Terminal output: tables, single-ticket details, JSON, and Markdown.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use ticgit_lib::Ticket;
 use ticgit_lib::TicketState;
@@ -216,6 +217,395 @@ pub fn ticket_json(t: &Ticket) -> Result<String, serde_json::Error> {
 
 pub fn tickets_json(t: &[Ticket]) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(t)
+}
+
+const TICKET_MARKDOWN_TEMPLATE: &str = r#"# Ticket: {title}
+
+## Details
+
+{details}
+
+## Description
+
+{description}
+
+## Metadata
+
+{metadata}
+
+## Comments
+
+{comments}
+
+## Next Commands
+
+{next_commands}
+"#;
+
+const TICKETS_MARKDOWN_TEMPLATE: &str = r#"# Tickets
+
+- Count: {count}
+
+## Overview
+
+{overview}
+
+## Ticket Details
+
+{details}
+
+## Next Commands
+
+{next_commands}
+"#;
+
+const IMPORT_MARKDOWN_TEMPLATE: &str = r#"# GitHub Issue Import
+
+- Imported: {imported}
+- Skipped: {skipped}
+
+## Imported Tickets
+
+{tickets}
+
+## Next Commands
+
+{next_commands}
+"#;
+
+/// Render a single ticket as Markdown for agents and documents.
+pub fn ticket_markdown(t: &Ticket) -> String {
+    render_template(
+        TICKET_MARKDOWN_TEMPLATE,
+        &[
+            ("title", markdown_inline(&flatten(&t.title))),
+            ("details", ticket_details_markdown(t)),
+            ("description", markdown_body(t.description.as_deref())),
+            ("metadata", metadata_markdown(t)),
+            ("comments", comments_markdown(t)),
+            ("next_commands", ticket_next_commands(t)),
+        ],
+    )
+}
+
+/// Render tickets as Markdown, including overview and full per-ticket details.
+pub fn tickets_markdown(tickets: &[Ticket]) -> String {
+    render_template(
+        TICKETS_MARKDOWN_TEMPLATE,
+        &[
+            ("count", tickets.len().to_string()),
+            ("overview", tickets_overview_markdown(tickets)),
+            ("details", tickets_details_markdown(tickets)),
+            ("next_commands", tickets_next_commands(tickets)),
+        ],
+    )
+}
+
+/// Render checkout-clear status as Markdown.
+pub fn checkout_clear_markdown() -> String {
+    "\
+# Current Ticket
+
+- Current: none
+
+## Next Commands
+
+- `ti list --markdown` to inspect open tickets.
+- `ti checkout <id>` to select a current ticket.
+"
+    .to_string()
+}
+
+/// Render GitHub import summary as Markdown.
+pub fn import_markdown(imported: usize, skipped: usize, tickets: &[Ticket]) -> String {
+    render_template(
+        IMPORT_MARKDOWN_TEMPLATE,
+        &[
+            ("imported", imported.to_string()),
+            ("skipped", skipped.to_string()),
+            ("tickets", imported_tickets_markdown(tickets)),
+            ("next_commands", import_next_commands(tickets)),
+        ],
+    )
+}
+
+fn render_template(template: &str, values: &[(&str, String)]) -> String {
+    let mut out = template.to_string();
+    for (key, value) in values {
+        out = out.replace(&format!("{{{key}}}"), value);
+    }
+    out
+}
+
+fn ticket_details_markdown(t: &Ticket) -> String {
+    let mut out = String::new();
+    writeln!(out, "- Id: {}", code_span(&t.id.to_string())).unwrap();
+    writeln!(out, "- Short id: {}", code_span(&t.short_id())).unwrap();
+    writeln!(out, "- Title: {}", markdown_inline(&t.title)).unwrap();
+    writeln!(out, "- Status: {}", code_span(t.status.as_str())).unwrap();
+    writeln!(out, "- State: {}", code_span(t.state.as_str())).unwrap();
+    writeln!(
+        out,
+        "- Created: {} ({}) by {}",
+        markdown_inline(&friendly_date(t.created_at)),
+        code_span(&t.created_at.format(&Rfc3339).unwrap_or_default()),
+        markdown_inline(&t.created_by)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Assigned: {}",
+        optional_inline(t.assigned.as_deref())
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Points: {}",
+        t.points
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Milestone: {}",
+        optional_inline(t.milestone.as_deref())
+    )
+    .unwrap();
+    writeln!(out, "- Tags: {}", tags_inline(t)).unwrap();
+    out.trim_end().to_string()
+}
+
+fn metadata_markdown(t: &Ticket) -> String {
+    if t.meta.is_empty() {
+        return "_No metadata._".to_string();
+    }
+
+    let mut out = String::new();
+    for (field, value) in &t.meta {
+        writeln!(
+            out,
+            "- {}: {}",
+            code_span(field),
+            markdown_body(Some(value))
+        )
+        .unwrap();
+    }
+    out.trim_end().to_string()
+}
+
+fn comments_markdown(t: &Ticket) -> String {
+    if t.comments.is_empty() {
+        return "_No comments._".to_string();
+    }
+
+    let mut out = String::new();
+    for (index, comment) in t.comments.iter().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        writeln!(out, "**Comment {}**", index + 1).unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "- Author: {}", markdown_inline(&comment.author)).unwrap();
+        writeln!(
+            out,
+            "- At: {}",
+            code_span(&comment.at.format(&Rfc3339).unwrap_or_default())
+        )
+        .unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "{}", markdown_body(Some(&comment.body))).unwrap();
+    }
+    out.trim_end().to_string()
+}
+
+fn tickets_overview_markdown(tickets: &[Ticket]) -> String {
+    if tickets.is_empty() {
+        return "_No tickets._".to_string();
+    }
+
+    let mut out = String::from("| Id | Title | Status | State | Assigned | Tags | Created |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    for ticket in tickets {
+        writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            table_cell(&ticket.short_id()),
+            table_cell(&ticket.title),
+            table_cell(ticket.status.as_str()),
+            table_cell(ticket.state.as_str()),
+            table_cell(ticket.assigned.as_deref().unwrap_or("")),
+            table_cell(&ticket.tags.iter().cloned().collect::<Vec<_>>().join(", ")),
+            table_cell(&friendly_date(ticket.created_at)),
+        )
+        .unwrap();
+    }
+    out.trim_end().to_string()
+}
+
+fn tickets_details_markdown(tickets: &[Ticket]) -> String {
+    if tickets.is_empty() {
+        return "_No tickets matched._".to_string();
+    }
+
+    tickets
+        .iter()
+        .map(ticket_detail_section_markdown)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn ticket_detail_section_markdown(t: &Ticket) -> String {
+    render_template(
+        "\
+### {title}
+
+{details}
+
+#### Description
+
+{description}
+
+#### Metadata
+
+{metadata}
+
+#### Comments
+
+{comments}",
+        &[
+            ("title", markdown_inline(&flatten(&t.title))),
+            ("details", ticket_details_markdown(t)),
+            ("description", markdown_body(t.description.as_deref())),
+            ("metadata", metadata_markdown(t)),
+            ("comments", comments_markdown(t)),
+        ],
+    )
+}
+
+fn imported_tickets_markdown(tickets: &[Ticket]) -> String {
+    if tickets.is_empty() {
+        "_No new tickets imported._".to_string()
+    } else {
+        tickets_details_markdown(tickets)
+    }
+}
+
+fn ticket_next_commands(t: &Ticket) -> String {
+    let id = t.short_id();
+    let mut commands = vec![
+        format!("`ti show {id} --markdown` to refresh this ticket."),
+        format!("`ti checkout {id}` to make this the current ticket."),
+        format!("`ti comment -t {id} \"progress update\"` to add a progress note."),
+        format!("`ti edit {id}` to update the title or description."),
+        format!("`ti tag -t {id} <tag>` to add a queryable tag."),
+    ];
+
+    if t.status == TicketStatus::Open {
+        commands.push(format!("`ti state blocked -t {id}` to mark it blocked."));
+        commands.push(format!("`ti state closed -t {id}` to resolve it."));
+    } else {
+        commands.push(format!("`ti state open -t {id}` to reopen it."));
+    }
+
+    commands
+        .into_iter()
+        .map(|command| format!("- {command}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn tickets_next_commands(tickets: &[Ticket]) -> String {
+    let mut commands = vec![
+        "`ti list --markdown --all` to include closed tickets.".to_string(),
+        "`ti list --markdown --tag <tag>` to narrow by tag.".to_string(),
+        "`ti list --markdown --assigned <user>` to narrow by assignee.".to_string(),
+    ];
+    if let Some(ticket) = tickets.first() {
+        let id = ticket.short_id();
+        commands.push(format!(
+            "`ti show {id} --markdown` to inspect the first ticket."
+        ));
+        commands.push(format!("`ti checkout {id}` to make it current."));
+    } else {
+        commands.push("`ti new --title \"...\" --markdown` to create a ticket.".to_string());
+    }
+
+    commands
+        .into_iter()
+        .map(|command| format!("- {command}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn import_next_commands(tickets: &[Ticket]) -> String {
+    let mut commands = vec![
+        "`ti list --markdown --tag github` to review imported GitHub tickets.".to_string(),
+        "`ti sync` to share imported ticket metadata.".to_string(),
+    ];
+    if let Some(ticket) = tickets.first() {
+        commands.push(format!(
+            "`ti show {} --markdown` to inspect the first imported ticket.",
+            ticket.short_id()
+        ));
+    }
+    commands
+        .into_iter()
+        .map(|command| format!("- {command}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn optional_inline(value: Option<&str>) -> String {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .map(markdown_inline)
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn tags_inline(t: &Ticket) -> String {
+    if t.tags.is_empty() {
+        "none".to_string()
+    } else {
+        t.tags
+            .iter()
+            .map(|tag| code_span(tag))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn markdown_body(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "_None._".to_string())
+}
+
+fn markdown_inline(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('`', "\\`")
+        .replace('*', "\\*")
+        .replace('_', "\\_")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+        .replace('<', "\\<")
+        .replace('>', "\\>")
+        .replace('\n', " ")
+}
+
+fn table_cell(value: &str) -> String {
+    markdown_inline(&flatten(value)).replace('|', "\\|")
+}
+
+fn code_span(value: &str) -> String {
+    if value.contains('`') {
+        format!("`` {value} ``")
+    } else {
+        format!("`{value}`")
+    }
 }
 
 fn fit(value: &str, width: usize) -> String {

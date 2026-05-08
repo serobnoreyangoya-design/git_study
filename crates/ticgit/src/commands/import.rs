@@ -7,6 +7,7 @@ use serde::Deserialize;
 use ticgit_lib::{NewTicketOpts, Ticket, TicketStore};
 
 use crate::commands::open_store;
+use crate::render;
 
 const GH_ISSUE_FIELDS: &str = "number,title,body,url,author,labels,assignees,milestone";
 const GITHUB_TAG: &str = "github";
