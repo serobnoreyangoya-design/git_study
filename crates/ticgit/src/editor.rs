@@ -1,6 +1,7 @@
 //! `$EDITOR` integration for capturing multi-line input from the user.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
