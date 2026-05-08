@@ -91,6 +91,17 @@ ti comment --ticket <id> "blocked on parser fixture" --markdown
 
 The stable machine-output schema is published at [`schema/v1.json`](schema/v1.json). `ti show --json` and JSON mutation commands emit a ticket object. `ti list --json` emits an array of ticket objects. Commands that support `--json` also support `--markdown`, which renders the same ticket data as Markdown and includes suggested next commands. Ticket metadata appears under `.meta` as an object whose values are strings.
 
+`--json` is the stable machine interface:
+
+- successful JSON commands write parseable JSON to stdout only
+- diagnostic and error text goes to stderr
+- JSON output does not include ANSI color escapes
+- non-zero exit status means the command failed
+- ticket ids may be full UUIDs or unique UUID prefixes
+- ambiguous or missing prefixes fail with a non-zero exit status and stderr diagnostic
+
+`--porcelain` and `--format json` are not supported compatibility aliases today; use `--json` for schema-stable output.
+
 Agents can also run:
 
 ```sh
