@@ -15,7 +15,22 @@ pub struct Filter {
     pub tag: Option<String>,
     pub assigned: Option<String>,
     pub only_tagged: bool,
+    pub search: Option<SearchFilter>,
     pub order: Option<SortOrder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFilter {
+    pub scope: SearchScope,
+    pub needle: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    Any,
+    Title,
+    Description,
+    Comments,
 }
 
 /// Sort orders accepted by `ti list -o`. Each can be inverted with the
