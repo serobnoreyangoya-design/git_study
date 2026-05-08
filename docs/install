@@ -1,0 +1,59 @@
+#!/bin/sh
+# ticgit installer bootstrap script
+# Usage: curl -fsSL https://ticgit.dev/install | sh
+
+# Wrap everything in main() so `curl | sh` does not execute a partial download.
+main() {
+  set -eu
+
+  for cmd in command uname tr; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+      echo "error: required command '$cmd' not found" >&2
+      exit 1
+    fi
+  done
+
+  OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ARCH=$(uname -m | tr '[:upper:]' '[:lower:]')
+
+  case "$OS" in
+    darwin) PLATFORM="macOS" ;;
+    linux) PLATFORM="Linux" ;;
+    mingw*|msys*|cygwin*) PLATFORM="Windows" ;;
+    *)
+      echo "error: unsupported operating system: $OS" >&2
+      echo "ticgit currently installs from crates.io; try: cargo install ticgit" >&2
+      exit 1
+      ;;
+  esac
+
+  case "$ARCH" in
+    x86_64|amd64|arm64|aarch64) ;;
+    *)
+      echo "error: unsupported architecture: $ARCH" >&2
+      echo "ticgit currently installs from crates.io; try: cargo install ticgit" >&2
+      exit 1
+      ;;
+  esac
+
+  echo "Installing ticgit for $PLATFORM/$ARCH..."
+
+  if command -v cargo >/dev/null 2>&1; then
+    cargo install ticgit
+  else
+    echo "error: cargo was not found" >&2
+    echo "Install Rust from https://rustup.rs, then run:" >&2
+    echo "  cargo install ticgit" >&2
+    exit 1
+  fi
+
+  if ! command -v ti >/dev/null 2>&1; then
+    echo "error: ticgit installed, but 'ti' is not on PATH" >&2
+    echo "Make sure Cargo's bin directory is on PATH, usually: \$HOME/.cargo/bin" >&2
+    exit 1
+  fi
+
+  echo "Installed $(ti --version)"
+}
+
+main "$@"
