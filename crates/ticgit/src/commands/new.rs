@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use ticgit_lib::NewTicketOpts;
 
-use crate::commands::open_store;
+use crate::commands::{open_store, SessionGitDir};
 use crate::editor;
 use crate::render;
+use crate::session_state::State;
 
 #[derive(Debug, Parser)]
 pub struct Args {

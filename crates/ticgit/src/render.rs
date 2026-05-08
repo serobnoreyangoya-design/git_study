@@ -1,6 +1,9 @@
 //! Terminal output: tables, single-ticket details, and JSON.
 
+use std::collections::BTreeMap;
+
 use ticgit_lib::Ticket;
+use ticgit_lib::TicketState;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -15,20 +18,62 @@ const ANSI_CYAN: &str = "\x1b[36m";
 
 /// Render a list of tickets as a compact table. `current` (if any) gets a `*`.
 pub fn tickets_table(tickets: &[Ticket], current: Option<&uuid::Uuid>) -> String {
+    let ref_lengths = open_ticket_ref_lengths(tickets);
+    tickets_table_with_refs(tickets, current, &ref_lengths)
+}
+
+/// Render a list with caller-provided open-ticket short reference lengths.
+pub fn tickets_table_with_refs(
+    tickets: &[Ticket],
+    current: Option<&uuid::Uuid>,
+    ref_lengths: &BTreeMap<uuid::Uuid, usize>,
+) -> String {
     let width = crossterm::terminal::size()
         .map(|(columns, _)| columns as usize)
         .unwrap_or(100)
         .max(40);
-    tickets_table_with_width(tickets, current, width, OffsetDateTime::now_utc())
+    tickets_table_with_width(
+        tickets,
+        current,
+        ref_lengths,
+        width,
+        OffsetDateTime::now_utc(),
+    )
+}
+
+pub fn open_ticket_ref_lengths(tickets: &[Ticket]) -> BTreeMap<uuid::Uuid, usize> {
+    let open_hexes: Vec<_> = tickets
+        .iter()
+        .filter(|ticket| ticket.state == TicketState::Open)
+        .map(|ticket| (ticket.id, ticket.id.to_string().replace('-', "")))
+        .collect();
+
+    open_hexes
+        .iter()
+        .map(|(id, hex)| {
+            let length = (1..=hex.len())
+                .find(|length| {
+                    let prefix = &hex[..*length];
+                    open_hexes
+                        .iter()
+                        .filter(|(_, other)| other.starts_with(prefix))
+                        .count()
+                        == 1
+                })
+                .unwrap_or(hex.len());
+            (*id, length)
+        })
+        .collect()
 }
 
 fn tickets_table_with_width(
     tickets: &[Ticket],
     current: Option<&uuid::Uuid>,
+    ref_lengths: &BTreeMap<uuid::Uuid, usize>,
     width: usize,
     now: OffsetDateTime,
 ) -> String {
-    const ID_WIDTH: usize = 6;
+    let id_width = ref_lengths.values().copied().max().unwrap_or(6).max(6);
     const STATE_WIDTH: usize = 5;
     const DATE_WIDTH: usize = 5;
     const ASSIGNED_WIDTH: usize = 8;
