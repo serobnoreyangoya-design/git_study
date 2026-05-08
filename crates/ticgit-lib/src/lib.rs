@@ -9,7 +9,10 @@
 //! ticgit:tickets:<uuid>:description    # string (optional)
 //! ticgit:tickets:<uuid>:state          # string ("open" | ...)
 //! ticgit:tickets:<uuid>:assigned       # string (optional)
+//! ticgit:tickets:<uuid>:points         # string (optional integer)
+//! ticgit:tickets:<uuid>:milestone      # string (optional)
 //! ticgit:tickets:<uuid>:tags           # set
+//! ticgit:tickets:<uuid>:meta:<key>     # string
 //! ticgit:tickets:<uuid>:comments       # list of JSON-encoded {author, body}
 //! ticgit:tickets:<uuid>:created-at     # RFC3339 string
 //! ticgit:tickets:<uuid>:created-by     # string (email)
@@ -18,7 +21,8 @@
 //! ticgit:schema-version                # string ("1")
 //! ```
 //!
-//! See the top-level `README.md` for higher-level docs.
+//! See the top-level `README.md` and `docs/schema/v1.json` for higher-level
+//! docs and the stable JSON machine-output schema.
 
 pub mod error;
 pub mod keys;

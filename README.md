@@ -57,6 +57,7 @@ ti list --tag bug
 ti list --assigned you@example.com
 ti list --order title.desc
 ti list --json
+ti list --markdown
 ```
 
 Show details:
@@ -64,7 +65,36 @@ Show details:
 ```sh
 ti show <id>
 ti show <id> --json
+ti show <id> --markdown
 ```
+
+Commands that support `--json` also support `--markdown`, which renders the same
+ticket data as Markdown and includes suggested next commands for agent workflows.
+
+## Machine Output
+
+TicGit publishes a stable JSON schema for agent and automation workflows at
+[`docs/schema/v1.json`](docs/schema/v1.json). On the website, the same schema is
+available at [`https://ticgit.dev/schema/v1.json`](https://ticgit.dev/schema/v1.json).
+
+`--json` is the stable machine interface:
+
+- successful JSON commands write parseable JSON to stdout only
+- diagnostic and error text goes to stderr
+- JSON output does not include ANSI color escapes
+- non-zero exit status means the command failed
+- ticket ids may be full UUIDs or unique UUID prefixes
+- ambiguous or missing prefixes fail with a non-zero exit status and stderr diagnostic
+
+`ti show <id> --json` and JSON mutation commands emit a ticket object.
+`ti list --json` emits an array of ticket objects. Ticket metadata appears under
+`.meta` as an object whose values are strings.
+
+`--porcelain` and `--format json` are not supported compatibility aliases today;
+use `--json` for schema-stable output.
+
+Agents can run `ti help --agent` for a Markdown guide, or read the website's
+Markdown version at [`docs/index.md`](docs/index.md).
 
 Select a current ticket:
 

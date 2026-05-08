@@ -17,6 +17,10 @@ pub struct Args {
     /// Output the checked-out ticket as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output the checked-out ticket as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -29,6 +33,10 @@ pub fn run(args: Args) -> Result<()> {
         state.save()?;
         if args.json {
             println!("{}", serde_json::json!({ "current": null }));
+            return Ok(());
+        }
+        if args.markdown {
+            println!("{}", render::checkout_clear_markdown());
             return Ok(());
         }
         println!("Cleared current ticket.");
@@ -45,6 +53,10 @@ pub fn run(args: Args) -> Result<()> {
     let ticket = store.load(&id)?;
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
+        return Ok(());
+    }
+    if args.markdown {
+        println!("{}", render::ticket_markdown(&ticket));
         return Ok(());
     }
     println!("Checked out: {} - {}", ticket.short_id(), ticket.title);

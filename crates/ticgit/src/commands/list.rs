@@ -47,6 +47,10 @@ pub struct Args {
     /// Output as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -90,6 +94,11 @@ pub fn run(args: Args) -> Result<()> {
 
     if args.json {
         println!("{}", render::tickets_json(&tickets)?);
+        return Ok(());
+    }
+
+    if args.markdown {
+        println!("{}", render::tickets_markdown(&tickets));
         return Ok(());
     }
 

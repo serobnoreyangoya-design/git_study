@@ -14,6 +14,10 @@ pub struct Args {
     #[arg(long = "json")]
     pub json: bool,
 
+    /// Output the ticket as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
+
     /// Output only one JSON field, using a small jq-like path (e.g. `.title` or `.comments[0].body`).
     #[arg(long = "filter", num_args = 0..=1)]
     pub filter: Option<Option<String>>,
@@ -38,6 +42,8 @@ pub fn run(args: Args) -> Result<()> {
 
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
+    } else if args.markdown {
+        println!("{}", render::ticket_markdown(&ticket));
     } else {
         print!("{}", render::ticket_detail(&ticket));
     }

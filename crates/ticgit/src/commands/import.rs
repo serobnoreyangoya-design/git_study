@@ -39,6 +39,10 @@ pub struct GhArgs {
     /// Output an import summary and imported tickets as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output an import summary and imported tickets as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -87,6 +91,13 @@ fn run_gh(args: GhArgs) -> Result<()> {
                 "skipped": skipped,
                 "tickets": imported_tickets,
             })
+        );
+        return Ok(());
+    }
+    if args.markdown {
+        println!(
+            "{}",
+            render::import_markdown(imported, skipped, &imported_tickets)
         );
         return Ok(());
     }

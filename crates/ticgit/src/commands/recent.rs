@@ -14,6 +14,10 @@ pub struct Args {
     /// Emit JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Emit Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -30,6 +34,10 @@ pub fn run(args: Args) -> Result<()> {
 
     if args.json {
         println!("{}", render::tickets_json(&tickets)?);
+        return Ok(());
+    }
+    if args.markdown {
+        println!("{}", render::tickets_markdown(&tickets));
         return Ok(());
     }
     if tickets.is_empty() {

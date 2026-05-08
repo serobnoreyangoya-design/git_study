@@ -13,7 +13,7 @@ TicGit stores tickets as Git metadata, so ticket changes travel with the reposit
 
 ```sh
 ti list
-ti list --json
+ti list --markdown
 ti recent
 ```
 
@@ -49,10 +49,10 @@ Create a ticket from a file. The first line is the title; remaining non-empty co
 ti new -F /tmp/ticket.md --tags feature,agent
 ```
 
-Use `--json` when you need the created ticket id:
+Use `--markdown` when you need the created ticket details and suggested next commands:
 
 ```sh
-ti new -F /tmp/ticket.md --json
+ti new -F /tmp/ticket.md --markdown
 ```
 
 ## Read Tickets
@@ -92,7 +92,7 @@ Show one ticket, or the current ticket if one is checked out:
 ```sh
 ti show <id>
 ti show
-ti show <id> --json
+ti show <id> --markdown
 ```
 
 Extract a single JSON field:
@@ -101,6 +101,28 @@ Extract a single JSON field:
 ti show <id> --filter .title
 ti show <id> --filter .comments[0].body
 ```
+
+## Machine Output Schema
+
+The stable JSON schema for `ti show --json`, JSON mutation commands, and `ti list --json` is published at:
+
+```text
+https://ticgit.dev/schema/v1.json
+docs/schema/v1.json
+```
+
+`ti show --json` emits a ticket object. `ti list --json` emits an array of ticket objects. Ticket metadata appears under `.meta` as a string-to-string object.
+
+Machine-mode guarantees for `--json`:
+
+- successful JSON commands write parseable JSON to stdout only
+- diagnostic and error text goes to stderr
+- JSON output does not include ANSI color escapes
+- non-zero exit status means the command failed
+- ticket ids may be full UUIDs or unique UUID prefixes
+- ambiguous or missing prefixes fail with a non-zero exit status and stderr diagnostic
+
+`--porcelain` and `--format json` are not supported compatibility aliases today; use `--json` for schema-stable output.
 
 ## Edit Tickets
 
@@ -182,7 +204,7 @@ ti milestone -t <id> --clear
 
 ## Metadata
 
-Store structured string metadata under a ticket. Metadata appears in `ti show` and under `.meta` in `ti show --json`.
+Store structured string metadata under a ticket. Metadata appears in `ti show --markdown` and under `.meta` in `ti show --json`.
 
 ```sh
 ti meta -t <id> branch feature/parser-fix
@@ -212,7 +234,7 @@ ti sync
 
 ## Agent Practices
 
-- Prefer `--json` for commands that support it.
+- Prefer `--markdown` for commands that support it; use `--json` only when a script needs stable schema output.
 - Use ticket ids or unique prefixes; ambiguous prefixes fail.
 - Run `ti checkout <id>` before multi-step work so later commands can omit `-t <id>`.
 - Add comments for meaningful observations, plans, blockers, and results.
