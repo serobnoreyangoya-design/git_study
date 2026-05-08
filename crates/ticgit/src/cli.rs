@@ -1,6 +1,6 @@
 //! Clap definitions and top-level dispatch.
 
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 
 use crate::commands;
 

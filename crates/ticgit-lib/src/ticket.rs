@@ -1,6 +1,6 @@
 //! Domain types for tickets, comments, and ticket states.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
