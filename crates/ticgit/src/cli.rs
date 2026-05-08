@@ -34,6 +34,7 @@ pub enum Command {
     Show(commands::show::Args),
 
     /// Select a ticket as "current" for subsequent commands.
+    #[command(visible_alias = "co")]
     Checkout(commands::checkout::Args),
 
     /// Edit a ticket's title and description in your editor.
