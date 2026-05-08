@@ -13,6 +13,10 @@ pub struct Args {
     /// Ticket id (or prefix). Defaults to the currently checked-out ticket.
     pub ticket: Option<String>,
 
+    /// Read the updated title and description from a file.
+    #[arg(short = 'F', long = "file")]
+    pub file: Option<PathBuf>,
+
     /// Output the updated ticket as JSON.
     #[arg(long = "json")]
     pub json: bool,
@@ -23,12 +27,16 @@ pub fn run(args: Args) -> Result<()> {
     let id = resolve_ticket(&store, args.ticket.as_deref())?;
     let ticket = store.load(&id)?;
 
-    let edited = editor::capture_with_initial(
-        "Edit the title on the first line. Remaining non-comment lines become the description.",
-        &editor_body(&ticket),
-    )?
-    .context("ticket title cannot be empty")?;
-    let (title, description) = parse_ticket_edit(&edited)?;
+    let (title, description) = if let Some(path) = args.file {
+        editor::read_ticket_edit_file(&path)?
+    } else {
+        let edited = editor::capture_with_initial(
+            "Edit the title on the first line. Remaining non-comment lines become the description.",
+            &editor_body(&ticket),
+        )?
+        .context("ticket title cannot be empty")?;
+        editor::parse_ticket_edit(&edited)?
+    };
 
     store.set_title(&id, &title)?;
     store.set_description(&id, description.as_deref())?;
@@ -51,23 +59,6 @@ fn editor_body(ticket: &Ticket) -> String {
     body
 }
 
-fn parse_ticket_edit(raw: &str) -> Result<(String, Option<String>)> {
-    let mut lines = raw.lines();
-    let title = lines.next().unwrap_or_default().trim().to_string();
-    if title.is_empty() {
-        anyhow::bail!("ticket title cannot be empty");
-    }
-
-    let description = lines.collect::<Vec<_>>().join("\n").trim().to_string();
-    let description = if description.is_empty() {
-        None
-    } else {
-        Some(description)
-    };
-
-    Ok((title, description))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,7 +66,7 @@ mod tests {
     #[test]
     fn parse_ticket_edit_splits_title_and_description() {
         let (title, description) =
-            parse_ticket_edit("updated title\n\nfirst line\nsecond line\n").unwrap();
+            editor::parse_ticket_edit("updated title\n\nfirst line\nsecond line\n").unwrap();
 
         assert_eq!(title, "updated title");
         assert_eq!(description.as_deref(), Some("first line\nsecond line"));
@@ -83,7 +74,7 @@ mod tests {
 
     #[test]
     fn parse_ticket_edit_allows_clearing_description() {
-        let (title, description) = parse_ticket_edit("updated title\n\n").unwrap();
+        let (title, description) = editor::parse_ticket_edit("updated title\n\n").unwrap();
 
         assert_eq!(title, "updated title");
         assert_eq!(description, None);
@@ -91,6 +82,6 @@ mod tests {
 
     #[test]
     fn parse_ticket_edit_rejects_empty_title() {
-        assert!(parse_ticket_edit("\nbody").is_err());
+        assert!(editor::parse_ticket_edit("\nbody").is_err());
     }
 }

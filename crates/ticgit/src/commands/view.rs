@@ -56,6 +56,7 @@ pub fn run_save(args: SaveArgs) -> Result<()> {
         tag: args.tag,
         assigned: args.assigned,
         only_tagged: args.only_tagged,
+        search: None,
         order,
     };
     let ids: BTreeSet<_> = ticgit_lib::query::apply(tickets, &filter)

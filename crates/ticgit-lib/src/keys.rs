@@ -46,6 +46,12 @@ pub fn ticket_field(id: &Uuid, field: &str) -> String {
     format!("{NS}:tickets:{id}:{field}")
 }
 
+/// A specific metadata field on a ticket, e.g. `ticgit:tickets:<uuid>:meta:branch`.
+#[must_use]
+pub fn ticket_meta_field(id: &Uuid, field: &str) -> String {
+    ticket_field(id, &format!("meta:{field}"))
+}
+
 /// A bare project-level system key, e.g. `ticgit:owners`.
 #[must_use]
 pub fn system_key(name: &str) -> String {
@@ -113,6 +119,10 @@ mod tests {
         assert_eq!(
             ticket_field(&id, "state"),
             "ticgit:tickets:00000000-0000-0000-0000-000000000001:state"
+        );
+        assert_eq!(
+            ticket_meta_field(&id, "branch"),
+            "ticgit:tickets:00000000-0000-0000-0000-000000000001:meta:branch"
         );
         assert_eq!(system_key("owners"), "ticgit:owners");
         assert_eq!(system_key("schema-version"), "ticgit:schema-version");

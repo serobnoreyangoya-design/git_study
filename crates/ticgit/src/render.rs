@@ -165,6 +165,17 @@ pub fn ticket_detail(t: &Ticket) -> String {
         let tags: Vec<_> = t.tags.iter().cloned().collect();
         out.push_str(&detail_field("Tags", &ansi(ANSI_YELLOW, &tags.join(", "))));
     }
+    if !t.meta.is_empty() {
+        out.push_str(&ansi(ANSI_YELLOW, "Metadata:"));
+        out.push('\n');
+        for (field, value) in &t.meta {
+            out.push_str(&format!(
+                "  {}: {}\n",
+                ansi(ANSI_CYAN, field),
+                value.replace('\n', "\n    ")
+            ));
+        }
+    }
     out.push_str(&ansi(ANSI_YELLOW, "Description:"));
     out.push('\n');
     match t.description.as_deref().filter(|d| !d.trim().is_empty()) {
@@ -313,7 +324,7 @@ fn friendly_date(when: OffsetDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 
     #[test]
@@ -349,6 +360,7 @@ mod tests {
             points: None,
             milestone: None,
             tags: BTreeSet::new(),
+            meta: BTreeMap::new(),
             comments: Vec::new(),
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "tester@example.com".to_string(),

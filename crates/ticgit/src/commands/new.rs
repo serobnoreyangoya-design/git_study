@@ -15,6 +15,10 @@ pub struct Args {
     #[arg(short = 't', long = "title")]
     pub title: Option<String>,
 
+    /// Read the title and description from a file.
+    #[arg(short = 'F', long = "file", conflicts_with = "title")]
+    pub file: Option<PathBuf>,
+
     /// Comma- or space-separated list of tags to apply on creation.
     #[arg(short = 'g', long = "tags")]
     pub tags: Option<String>,
@@ -47,9 +51,14 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
 
-    let title = match args.title {
-        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => editor::capture("Ticket title")?.context("ticket title cannot be empty")?,
+    let (title, description) = if let Some(path) = args.file {
+        editor::read_ticket_edit_file(&path)?
+    } else {
+        let title = match args.title {
+            Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+            _ => editor::capture("Ticket title")?.context("ticket title cannot be empty")?,
+        };
+        (title, None)
     };
 
     let comment = if args.comment_edit {
@@ -65,7 +74,11 @@ pub fn run(args: Args) -> Result<()> {
         tags,
         assigned: args.assigned,
     };
-    let ticket = store.create(&title, opts)?;
+    let mut ticket = store.create(&title, opts)?;
+    if let Some(description) = description {
+        store.set_description(&ticket.id, Some(&description))?;
+        ticket = store.load(&ticket.id)?;
+    }
 
     if args.checkout {
         let git_dir = store.session().repo_git_dir();

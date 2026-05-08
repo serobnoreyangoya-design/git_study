@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(short = 'T', long = "only-tagged")]
     pub only_tagged: bool,
 
+    /// Search title, description, and comments. Use `title:term`, `description:term`, or `comments:term` to scope.
+    #[arg(long = "search")]
+    pub search: Option<String>,
+
     /// Sort order. e.g. `state`, `title.desc`, `created`, `assigned`.
     #[arg(short = 'o', long = "order")]
     pub order: Option<String>,
@@ -66,12 +70,17 @@ pub fn run(args: Args) -> Result<()> {
         ),
         None => None,
     };
+    let search = match args.search.as_deref() {
+        Some(spec) => Some(SearchFilter::parse(spec).map_err(|e| anyhow::anyhow!(e))?),
+        None => None,
+    };
 
     let filter = Filter {
         state,
         tag: args.tag,
         assigned: args.assigned,
         only_tagged: args.only_tagged,
+        search,
         order,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);

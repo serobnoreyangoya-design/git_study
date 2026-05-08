@@ -251,6 +251,24 @@ impl TicketStore {
         Ok(())
     }
 
+    pub fn set_meta(&self, id: &Uuid, field: &str, value: &str) -> Result<()> {
+        let field = field.trim();
+        if field.is_empty() {
+            return Err(Error::InvalidValue(
+                "metadata field cannot be empty".to_string(),
+            ));
+        }
+        if field.contains(':') {
+            return Err(Error::InvalidValue(
+                "metadata field cannot contain `:`".to_string(),
+            ));
+        }
+
+        self.project_handle()
+            .set(&keys::ticket_meta_field(id, field), value)?;
+        Ok(())
+    }
+
     pub fn add_tag(&self, id: &Uuid, tag: &str) -> Result<()> {
         let tag = tag.trim();
         if tag.is_empty() {
@@ -409,6 +427,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
     let mut points: Option<i64> = None;
     let mut milestone: Option<String> = None;
     let mut tags: BTreeSet<String> = BTreeSet::new();
+    let mut meta: BTreeMap<String, String> = BTreeMap::new();
     let mut comments: Vec<Comment> = Vec::new();
     let mut created_at: Option<OffsetDateTime> = None;
     let mut created_by = String::new();
@@ -425,6 +444,12 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
             ("milestone", MetaValue::String(s)) => milestone = Some(s),
             ("tags", MetaValue::Set(members)) => tags = members,
             ("comments", MetaValue::List(entries)) => comments = decode_comments(entries),
+            (field, MetaValue::String(s)) if field.starts_with("meta:") => {
+                let key = field.trim_start_matches("meta:");
+                if !key.is_empty() {
+                    meta.insert(key.to_string(), s);
+                }
+            }
             ("created-at", MetaValue::String(s)) => {
                 created_at = OffsetDateTime::parse(&s, &Rfc3339).ok();
             }
@@ -445,6 +470,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         points,
         milestone,
         tags,
+        meta,
         comments,
         created_at,
         created_by,

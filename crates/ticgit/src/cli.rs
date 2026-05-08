@@ -8,12 +8,17 @@ use crate::commands;
 #[command(
     name = "ti",
     version,
+    disable_version_flag = true,
     about = "Tickets in your Git repo, stored as git-meta metadata",
     long_about = "ti - a Git-native ticket tracker. Tickets, comments, tags, and \
                   assignments are stored as git-meta metadata on the project target \
-                  and travel with the repo via push/pull."
+                  and travel with the repo via sync."
 )]
 pub struct Cli {
+    /// Print version.
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    pub version: Option<bool>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -36,6 +41,9 @@ pub enum Command {
     /// Select a ticket as "current" for subsequent commands.
     #[command(visible_alias = "co")]
     Checkout(commands::checkout::Args),
+
+    /// Close a ticket by marking it resolved.
+    Close(commands::close::Args),
 
     /// Edit a ticket's title and description in your editor.
     Edit(commands::edit::Args),
@@ -64,6 +72,9 @@ pub enum Command {
     /// Set or clear a ticket's milestone.
     Milestone(commands::milestone::Args),
 
+    /// Set a string metadata field on a ticket.
+    Meta(commands::meta::Args),
+
     /// Add a comment to a ticket.
     Comment(commands::comment::Args),
 
@@ -75,12 +86,6 @@ pub enum Command {
 
     /// Sync ticket metadata with a Git remote (pull then push).
     Sync(commands::sync::Args),
-
-    /// Pull ticket metadata from a Git remote.
-    Pull(commands::sync::PullArgs),
-
-    /// Push ticket metadata to a Git remote.
-    Push(commands::sync::PushArgs),
 }
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
@@ -91,6 +96,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::List(args)) => commands::list::run(args),
         Some(Command::Show(args)) => commands::show::run(args),
         Some(Command::Checkout(args)) => commands::checkout::run(args),
+        Some(Command::Close(args)) => commands::close::run(args),
         Some(Command::Edit(args)) => commands::edit::run(args),
         Some(Command::Import(args)) => commands::import::run(args),
         Some(Command::Recent(args)) => commands::recent::run(args),
@@ -100,11 +106,10 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Assign(args)) => commands::assign::run(args),
         Some(Command::Points(args)) => commands::points::run(args),
         Some(Command::Milestone(args)) => commands::milestone::run(args),
+        Some(Command::Meta(args)) => commands::meta::run(args),
         Some(Command::Comment(args)) => commands::comment::run(args),
         Some(Command::SaveView(args)) => commands::view::run_save(args),
         Some(Command::Views(args)) => commands::view::run_list(args),
         Some(Command::Sync(args)) => commands::sync::run_sync(args),
-        Some(Command::Pull(args)) => commands::sync::run_pull(args),
-        Some(Command::Push(args)) => commands::sync::run_push(args),
     }
 }
