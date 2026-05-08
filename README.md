@@ -52,7 +52,8 @@ List and filter:
 
 ```sh
 ti list
-ti list --state open
+ti list --status open
+ti list --state blocked
 ti list --tag bug
 ti list --assigned you@example.com
 ti list --order title.desc
@@ -108,7 +109,10 @@ ti checkout --clear
 Mutate tickets:
 
 ```sh
-ti state resolved --ticket <id>
+ti state blocked --ticket <id>
+ti state closed --ticket <id>
+ti state closed:wontfix --ticket <id>
+ti status review --ticket <id>
 ti assign you@example.com --ticket <id>
 ti assign --clear --ticket <id>
 ti points 3 --ticket <id>
@@ -118,6 +122,12 @@ ti tag --ticket <id> --remove ui
 ti edit <id>
 ti comment --ticket <id> "fixed in the latest patch"
 ```
+
+Lifecycle values are split into a broad `status` and a specific `state`.
+Open tickets use `new`, `assigned`, `in-progress`, `blocked`, or `review`.
+Closed tickets use `resolved`, `wontfix`, `duplicate`, or `invalid`.
+New tickets start as `open:new`; `ti state closed` defaults to
+`closed:resolved`.
 
 Recent tickets:
 
@@ -167,6 +177,7 @@ ticgit:owners                            set
 ticgit:views:<name>                      set of ticket UUIDs
 ticgit:tickets:<uuid>:title              string
 ticgit:tickets:<uuid>:description        string (optional)
+ticgit:tickets:<uuid>:status             string
 ticgit:tickets:<uuid>:state              string
 ticgit:tickets:<uuid>:assigned           string
 ticgit:tickets:<uuid>:points             string

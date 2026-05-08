@@ -60,8 +60,11 @@ pub enum Command {
     /// Add or remove a tag on a ticket.
     Tag(commands::tag::Args),
 
-    /// Change a ticket's state (open / resolved / invalid / hold).
+    /// Change a ticket's lifecycle status/state.
     State(commands::state::Args),
+
+    /// Alias for `state`.
+    Status(commands::state::Args),
 
     /// Set or clear a ticket's assigned user.
     Assign(commands::assign::Args),
@@ -103,6 +106,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Tui(args)) => commands::tui::run(args),
         Some(Command::Tag(args)) => commands::tag::run(args),
         Some(Command::State(args)) => commands::state::run(args),
+        Some(Command::Status(args)) => commands::state::run(args),
         Some(Command::Assign(args)) => commands::assign::run(args),
         Some(Command::Points(args)) => commands::points::run(args),
         Some(Command::Milestone(args)) => commands::milestone::run(args),

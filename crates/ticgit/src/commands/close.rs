@@ -23,7 +23,7 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let id = resolve_ticket(&store, args.ticket.as_deref())?;
-    store.set_state(&id, TicketState::Resolved)?;
+    store.set_lifecycle(&id, TicketStatus::Closed, TicketState::Resolved)?;
 
     let git_dir = store.session().repo_git_dir();
     let mut state = State::load().unwrap_or_default();

@@ -8,9 +8,13 @@ use crate::session_state::State;
 
 #[derive(Debug, Default, Parser)]
 pub struct Args {
-    /// Show only tickets in this state. Defaults to open.
+    /// Show only tickets in this status/state. Defaults to status open.
     #[arg(short = 's', long = "state")]
     pub state: Option<String>,
+
+    /// Show only tickets in this broad status.
+    #[arg(long = "status")]
+    pub status: Option<String>,
 
     /// Show all tickets, without the default open-only filter or limit.
     #[arg(long = "all")]
@@ -63,11 +67,19 @@ pub fn run(args: Args) -> Result<()> {
         tickets.retain(|t| ids.contains(&t.id));
     }
 
-    let state = match args.state.as_deref() {
-        Some(s) => Some(TicketState::parse(s)?),
-        None if args.all => None,
-        None => Some(TicketState::Open),
+    let mut status = match args.status.as_deref() {
+        Some(s) => Some(TicketStatus::parse(s)?),
+        None if args.all || args.state.is_some() => None,
+        None => Some(TicketStatus::Open),
     };
+    let mut state = None;
+    if let Some(spec) = args.state.as_deref() {
+        let lifecycle = TicketLifecycle::parse(spec)?;
+        status = Some(lifecycle.status);
+        if TicketStatus::parse(spec).is_err() {
+            state = Some(lifecycle.state);
+        }
+    }
     let order = match args.order.as_deref() {
         Some(spec) => Some(
             SortOrder::parse(spec).ok_or_else(|| anyhow::anyhow!("unknown sort order `{spec}`"))?,
@@ -80,6 +92,7 @@ pub fn run(args: Args) -> Result<()> {
     };
 
     let filter = Filter {
+        status,
         state,
         tag: args.tag,
         assigned: args.assigned,

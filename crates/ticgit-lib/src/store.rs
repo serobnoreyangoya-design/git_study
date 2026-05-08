@@ -82,9 +82,10 @@ impl TicketStore {
         // index to maintain.
         p.set(&keys::ticket_field(&id, "title"), title)?;
         p.set(
-            &keys::ticket_field(&id, "state"),
-            TicketState::Open.as_str(),
+            &keys::ticket_field(&id, "status"),
+            TicketStatus::Open.as_str(),
         )?;
+        p.set(&keys::ticket_field(&id, "state"), TicketState::New.as_str())?;
         p.set(&keys::ticket_field(&id, "created-at"), now_rfc.as_str())?;
         p.set(&keys::ticket_field(&id, "created-by"), self.session.email())?;
 
@@ -168,7 +169,7 @@ impl TicketStore {
                 let open_matches: Vec<&Ticket> = matches
                     .iter()
                     .copied()
-                    .filter(|t| t.state == TicketState::Open)
+                    .filter(|t| t.status == TicketStatus::Open)
                     .collect();
                 if open_matches.len() == 1 {
                     Ok(open_matches[0].id)
@@ -204,8 +205,20 @@ impl TicketStore {
     }
 
     pub fn set_state(&self, id: &Uuid, state: TicketState) -> Result<()> {
-        self.project_handle()
-            .set(&keys::ticket_field(id, "state"), state.as_str())?;
+        self.set_lifecycle(id, state.status(), state)
+    }
+
+    pub fn set_lifecycle(&self, id: &Uuid, status: TicketStatus, state: TicketState) -> Result<()> {
+        if state.status() != status {
+            return Err(Error::InvalidState(format!(
+                "{}:{}",
+                status.as_str(),
+                state.as_str()
+            )));
+        }
+        let p = self.project_handle();
+        p.set(&keys::ticket_field(id, "status"), status.as_str())?;
+        p.set(&keys::ticket_field(id, "state"), state.as_str())?;
         Ok(())
     }
 
@@ -422,7 +435,10 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
 
     let mut title: Option<String> = None;
     let mut description: Option<String> = None;
-    let mut state = TicketState::Open;
+    let mut status: Option<TicketStatus> = None;
+    let mut state: Option<TicketState> = None;
+    let mut legacy_status: Option<TicketStatus> = None;
+    let mut legacy_state: Option<TicketState> = None;
     let mut assigned: Option<String> = None;
     let mut points: Option<i64> = None;
     let mut milestone: Option<String> = None;
@@ -436,9 +452,30 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         match (field.as_str(), value) {
             ("title", MetaValue::String(s)) => title = Some(s),
             ("description", MetaValue::String(s)) => description = Some(s),
-            ("state", MetaValue::String(s)) => {
-                state = TicketState::parse(&s).unwrap_or(TicketState::Open);
+            ("status", MetaValue::String(s)) => {
+                status = TicketStatus::parse(&s).ok();
             }
+            ("state", MetaValue::String(s)) => match s.as_str() {
+                "open" => {
+                    legacy_status = Some(TicketStatus::Open);
+                    legacy_state = Some(TicketState::New);
+                }
+                "hold" => {
+                    legacy_status = Some(TicketStatus::Open);
+                    legacy_state = Some(TicketState::Blocked);
+                }
+                "resolved" => {
+                    legacy_status = Some(TicketStatus::Closed);
+                    legacy_state = Some(TicketState::Resolved);
+                }
+                "invalid" => {
+                    legacy_status = Some(TicketStatus::Closed);
+                    legacy_state = Some(TicketState::Invalid);
+                }
+                _ => {
+                    state = TicketState::parse(&s).ok();
+                }
+            },
             ("assigned", MetaValue::String(s)) => assigned = Some(s),
             ("points", MetaValue::String(s)) => points = s.parse().ok(),
             ("milestone", MetaValue::String(s)) => milestone = Some(s),
@@ -460,11 +497,17 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
 
     let title = title?;
     let created_at = created_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let state = state.or(legacy_state).unwrap_or(TicketState::New);
+    let status = status
+        .or(legacy_status)
+        .filter(|status| *status == state.status())
+        .unwrap_or_else(|| state.status());
 
     Some(Ticket {
         id,
         title,
         description,
+        status,
         state,
         assigned,
         points,
@@ -513,7 +556,8 @@ mod tests {
         };
         let created = store.create("My new ticket", opts).unwrap();
         assert_eq!(created.title, "My new ticket");
-        assert_eq!(created.state, TicketState::Open);
+        assert_eq!(created.status, TicketStatus::Open);
+        assert_eq!(created.state, TicketState::New);
         assert_eq!(created.assigned.as_deref(), Some("scott@example.com"));
         assert!(created.tags.contains("bug"));
         assert!(created.tags.contains("ui"));
@@ -547,7 +591,21 @@ mod tests {
         let (store, _td) = test_store();
         let t = store.create("x", NewTicketOpts::default()).unwrap();
         store.set_state(&t.id, TicketState::Resolved).unwrap();
-        assert_eq!(store.load(&t.id).unwrap().state, TicketState::Resolved);
+        let loaded = store.load(&t.id).unwrap();
+        assert_eq!(loaded.status, TicketStatus::Closed);
+        assert_eq!(loaded.state, TicketState::Resolved);
+    }
+
+    #[test]
+    fn lifecycle_change_persists_status_and_state() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        store
+            .set_lifecycle(&t.id, TicketStatus::Open, TicketState::Blocked)
+            .unwrap();
+        let loaded = store.load(&t.id).unwrap();
+        assert_eq!(loaded.status, TicketStatus::Open);
+        assert_eq!(loaded.state, TicketState::Blocked);
     }
 
     #[test]
@@ -621,8 +679,14 @@ mod tests {
         let (store, _td) = test_store();
         let open = Uuid::parse_str("d7f2d8f6-d6ec-3da1-a180-0a33fb090d59").unwrap();
         let closed = Uuid::parse_str("d7f99999-d6ec-3da1-a180-0a33fb090d59").unwrap();
-        insert_ticket(&store, open, "open", TicketState::Open);
-        insert_ticket(&store, closed, "closed", TicketState::Resolved);
+        insert_ticket(&store, open, "open", TicketStatus::Open, TicketState::New);
+        insert_ticket(
+            &store,
+            closed,
+            "closed",
+            TicketStatus::Closed,
+            TicketState::Resolved,
+        );
 
         assert_eq!(store.resolve_id("d7f").unwrap(), open);
     }
@@ -654,10 +718,18 @@ mod tests {
         assert_eq!(store.load_view("everything").unwrap(), just_a);
     }
 
-    fn insert_ticket(store: &TicketStore, id: Uuid, title: &str, state: TicketState) {
+    fn insert_ticket(
+        store: &TicketStore,
+        id: Uuid,
+        title: &str,
+        status: TicketStatus,
+        state: TicketState,
+    ) {
         let p = store.project_handle();
         let created = OffsetDateTime::UNIX_EPOCH.format(&Rfc3339).unwrap();
         p.set(&keys::ticket_field(&id, "title"), title).unwrap();
+        p.set(&keys::ticket_field(&id, "status"), status.as_str())
+            .unwrap();
         p.set(&keys::ticket_field(&id, "state"), state.as_str())
             .unwrap();
         p.set(&keys::ticket_field(&id, "created-at"), created.as_str())

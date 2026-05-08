@@ -116,6 +116,7 @@ Available filters:
   .id
   .title
   .description
+  .status
   .state
   .assigned
   .points

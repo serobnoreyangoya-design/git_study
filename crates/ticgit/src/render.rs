@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use ticgit_lib::Ticket;
-use ticgit_lib::TicketState;
+use ticgit_lib::TicketStatus;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -45,7 +45,7 @@ pub fn tickets_table_with_refs(
 pub fn open_ticket_ref_lengths(tickets: &[Ticket]) -> BTreeMap<uuid::Uuid, usize> {
     let open_hexes: Vec<_> = tickets
         .iter()
-        .filter(|ticket| ticket.state == TicketState::Open)
+        .filter(|ticket| ticket.status == TicketStatus::Open)
         .map(|ticket| (ticket.id, ticket.id.to_string().replace('-', "")))
         .collect();
 
@@ -75,23 +75,30 @@ fn tickets_table_with_width(
     now: OffsetDateTime,
 ) -> String {
     let id_width = ref_lengths.values().copied().max().unwrap_or(6).max(6);
-    const STATE_WIDTH: usize = 5;
+    const STATUS_WIDTH: usize = 6;
+    const STATE_WIDTH: usize = 11;
     const DATE_WIDTH: usize = 5;
     const ASSIGNED_WIDTH: usize = 8;
     const TAGS_WIDTH: usize = 20;
     const GAPS_AND_MARKER: usize = 15;
     const MIN_TITLE_WIDTH: usize = 12;
 
-    let fixed_width =
-        id_width + STATE_WIDTH + DATE_WIDTH + ASSIGNED_WIDTH + TAGS_WIDTH + GAPS_AND_MARKER;
+    let fixed_width = id_width
+        + STATUS_WIDTH
+        + STATE_WIDTH
+        + DATE_WIDTH
+        + ASSIGNED_WIDTH
+        + TAGS_WIDTH
+        + GAPS_AND_MARKER;
     let title_width = width.saturating_sub(fixed_width).max(MIN_TITLE_WIDTH);
 
     let mut out = String::new();
     let header = format!(
-        "  {} {}  {} {} {} {}",
+        "  {} {}  {} {} {} {} {}",
         fit("TicId", id_width),
         fit("Date", DATE_WIDTH),
         fit("Title", title_width),
+        fit("Status", STATUS_WIDTH),
         fit("State", STATE_WIDTH),
         fit("Assgn", ASSIGNED_WIDTH),
         fit("Tags", TAGS_WIDTH)
@@ -115,6 +122,11 @@ fn tickets_table_with_width(
         ));
         out.push_str("  ");
         out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), title_width)));
+        out.push(' ');
+        out.push_str(&ansi(
+            status_color(t.status.as_str()),
+            &fit(t.status.as_str(), STATUS_WIDTH),
+        ));
         out.push(' ');
         out.push_str(&ansi(
             state_color(t.state.as_str()),
@@ -148,6 +160,10 @@ pub fn ticket_detail(t: &Ticket) -> String {
                 t.created_by
             ),
         ),
+    ));
+    out.push_str(&detail_field(
+        "Status",
+        &ansi(status_color(t.status.as_str()), t.status.as_str()),
     ));
     out.push_str(&detail_field(
         "State",
@@ -678,9 +694,17 @@ fn detail_field(label: &str, value: &str) -> String {
 
 fn state_color(state: &str) -> &'static str {
     match state {
+        "new" | "assigned" | "in-progress" => ANSI_GREEN,
+        "blocked" | "review" => ANSI_YELLOW,
+        "resolved" | "wontfix" | "duplicate" | "invalid" => ANSI_PURPLE,
+        _ => ANSI_DIM,
+    }
+}
+
+fn status_color(status: &str) -> &'static str {
+    match status {
         "open" => ANSI_GREEN,
-        "hold" => ANSI_YELLOW,
-        "resolved" | "invalid" => ANSI_PURPLE,
+        "closed" => ANSI_PURPLE,
         _ => ANSI_DIM,
     }
 }
@@ -715,6 +739,7 @@ fn friendly_date(when: OffsetDateTime) -> String {
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
+    use ticgit_lib::TicketState;
     use uuid::Uuid;
 
     #[test]
@@ -722,12 +747,12 @@ mod tests {
         let open = ticket(
             "d7f2d8f6-d6ec-3da1-a180-0a33fb090d59",
             "open",
-            TicketState::Open,
+            TicketState::New,
         );
         let other_open = ticket(
             "d7a2d8f6-d6ec-3da1-a180-0a33fb090d59",
             "other",
-            TicketState::Open,
+            TicketState::New,
         );
         let closed = ticket(
             "d7f99999-d6ec-3da1-a180-0a33fb090d59",
@@ -745,6 +770,7 @@ mod tests {
             id: Uuid::parse_str(id).unwrap(),
             title: title.to_string(),
             description: None,
+            status: state.status(),
             state,
             assigned: None,
             points: None,

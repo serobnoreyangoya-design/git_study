@@ -7,7 +7,8 @@
 //! ```text
 //! ticgit:tickets:<uuid>:title          # string
 //! ticgit:tickets:<uuid>:description    # string (optional)
-//! ticgit:tickets:<uuid>:state          # string ("open" | ...)
+//! ticgit:tickets:<uuid>:status         # string ("open" | "closed")
+//! ticgit:tickets:<uuid>:state          # string ("new" | "blocked" | ...)
 //! ticgit:tickets:<uuid>:assigned       # string (optional)
 //! ticgit:tickets:<uuid>:points         # string (optional integer)
 //! ticgit:tickets:<uuid>:milestone      # string (optional)
@@ -36,7 +37,7 @@ pub mod test_support;
 pub use error::{Error, Result};
 pub use query::{Filter, SearchFilter, SearchScope, SortKey, SortOrder};
 pub use store::TicketStore;
-pub use ticket::{Comment, NewTicketOpts, Ticket, TicketState};
+pub use ticket::{Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus};
 
 /// Re-exported for callers who want to talk to git-meta directly.
 pub use git_meta_lib::{MetaValue, Session, Target};

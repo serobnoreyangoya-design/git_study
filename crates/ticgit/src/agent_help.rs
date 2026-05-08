@@ -29,9 +29,9 @@ ti checkout --clear
 3. Update the ticket as work progresses:
 
 ```sh
-ti state hold
+ti state blocked
 ti state open
-ti state resolved
+ti state closed
 ti close
 ```
 
@@ -67,7 +67,8 @@ Useful filters:
 
 ```sh
 ti list --all
-ti list --state hold
+ti list --status open
+ti list --state blocked
 ti list --tag bug
 ti list --assigned alice@example.com
 ti list --only-tagged
@@ -170,16 +171,24 @@ ti comment -t <id> --edit
 
 ## State And Triage
 
-Supported states are `open`, `resolved`, `invalid`, and `hold`.
+Tickets have a broad `status` and a specific `state`.
 
-```sh
-ti state open -t <id>
-ti state hold -t <id>
-ti state resolved -t <id>
-ti state invalid -t <id>
+```text
+status=open   states: new, assigned, in-progress, blocked, review
+status=closed states: resolved, wontfix, duplicate, invalid
 ```
 
-Use `hold` for blocked or paused work. Use `resolved` when the implementation is complete.
+New tickets start as `open:new`. `ti state` and `ti status` accept either a status, a state, or an explicit `status:state` pair.
+
+```sh
+ti state open -t <id>              # open:new
+ti state blocked -t <id>           # open:blocked
+ti state closed -t <id>            # closed:resolved
+ti state closed:wontfix -t <id>    # closed:wontfix
+ti status review -t <id>           # open:review
+```
+
+Use `blocked` for paused or blocked work. Use `review` when implementation is ready for review. Use `closed:resolved` when implementation is complete.
 Use `ti close` as a shortcut for resolving a ticket; if the closed ticket is checked out, it also clears the checkout.
 
 ## Tags, Assignment, Estimates, Milestones

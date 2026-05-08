@@ -26,6 +26,7 @@ uuid         = { version = "1", features = ["v4", "serde"] }
 
 anyhow       = "1"
 clap         = { version = "4", features = ["derive"] }
+dialoguer    = "0.12"
 crossterm    = "0.29"
 dirs         = "5"
 ratatui      = "0.30"

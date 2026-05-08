@@ -5,12 +5,13 @@
 
 use std::cmp::Ordering;
 
-use crate::ticket::{Ticket, TicketState};
+use crate::ticket::{Ticket, TicketState, TicketStatus};
 
 /// All knobs `ti list` understands. Build one by parsing CLI flags and
 /// pass it through [`apply`].
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
+    pub status: Option<TicketStatus>,
     pub state: Option<TicketState>,
     pub tag: Option<String>,
     pub assigned: Option<String>,
@@ -152,6 +153,11 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
                     return false;
                 }
             }
+            if let Some(status) = filter.status {
+                if t.status != status {
+                    return false;
+                }
+            }
             if let Some(tag) = &filter.tag {
                 if !t.tags.contains(tag) {
                     return false;
@@ -177,13 +183,18 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     if let Some(order) = filter.order {
         tickets.sort_by(|a, b| compare(a, b, order.key, order.desc));
     } else {
-        // Stable default: open tickets first, then by created date desc.
+        // Stable default: open tickets first, then by lifecycle state and created date desc.
         tickets.sort_by(|a, b| {
+            let by_status = status_rank(a.status).cmp(&status_rank(b.status));
+            if by_status != Ordering::Equal {
+                return by_status;
+            }
             let by_state = state_rank(a.state).cmp(&state_rank(b.state));
             if by_state != Ordering::Equal {
-                return by_state;
+                by_state
+            } else {
+                b.created_at.cmp(&a.created_at)
             }
-            b.created_at.cmp(&a.created_at)
         });
     }
 
@@ -196,17 +207,31 @@ fn contains(haystack: &str, needle: &str) -> bool {
 
 fn state_rank(s: TicketState) -> u8 {
     match s {
-        TicketState::Open => 0,
-        TicketState::Hold => 1,
-        TicketState::Resolved => 2,
-        TicketState::Invalid => 3,
+        TicketState::New => 0,
+        TicketState::Assigned => 1,
+        TicketState::InProgress => 2,
+        TicketState::Blocked => 3,
+        TicketState::Review => 4,
+        TicketState::Resolved => 5,
+        TicketState::Wontfix => 6,
+        TicketState::Duplicate => 7,
+        TicketState::Invalid => 8,
+    }
+}
+
+fn status_rank(s: TicketStatus) -> u8 {
+    match s {
+        TicketStatus::Open => 0,
+        TicketStatus::Closed => 1,
     }
 }
 
 fn compare(a: &Ticket, b: &Ticket, key: SortKey, desc: bool) -> Ordering {
     let ord = match key {
         SortKey::Title => a.title.cmp(&b.title),
-        SortKey::State => state_rank(a.state).cmp(&state_rank(b.state)),
+        SortKey::State => status_rank(a.status)
+            .cmp(&status_rank(b.status))
+            .then_with(|| state_rank(a.state).cmp(&state_rank(b.state))),
         SortKey::Assigned => a
             .assigned
             .as_deref()
@@ -231,6 +256,7 @@ mod tests {
 
     fn t(
         title: &str,
+        status: TicketStatus,
         state: TicketState,
         tag: Option<&str>,
         assigned: Option<&str>,
@@ -244,6 +270,7 @@ mod tests {
             id: Uuid::new_v4(),
             title: title.into(),
             description: None,
+            status,
             state,
             assigned: assigned.map(String::from),
             points: None,
@@ -259,11 +286,40 @@ mod tests {
     #[test]
     fn filter_by_state() {
         let input = vec![
-            t("a", TicketState::Open, None, None, 1),
-            t("b", TicketState::Resolved, None, None, 2),
+            t("a", TicketStatus::Open, TicketState::New, None, None, 1),
+            t(
+                "b",
+                TicketStatus::Closed,
+                TicketState::Resolved,
+                None,
+                None,
+                2,
+            ),
         ];
         let f = Filter {
-            state: Some(TicketState::Open),
+            state: Some(TicketState::New),
+            ..Default::default()
+        };
+        let out = apply(input, &f);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "a");
+    }
+
+    #[test]
+    fn filter_by_status() {
+        let input = vec![
+            t("a", TicketStatus::Open, TicketState::Blocked, None, None, 1),
+            t(
+                "b",
+                TicketStatus::Closed,
+                TicketState::Resolved,
+                None,
+                None,
+                2,
+            ),
+        ];
+        let f = Filter {
+            status: Some(TicketStatus::Open),
             ..Default::default()
         };
         let out = apply(input, &f);
@@ -274,8 +330,22 @@ mod tests {
     #[test]
     fn filter_by_tag() {
         let input = vec![
-            t("a", TicketState::Open, Some("bug"), None, 1),
-            t("b", TicketState::Open, Some("ui"), None, 2),
+            t(
+                "a",
+                TicketStatus::Open,
+                TicketState::New,
+                Some("bug"),
+                None,
+                1,
+            ),
+            t(
+                "b",
+                TicketStatus::Open,
+                TicketState::New,
+                Some("ui"),
+                None,
+                2,
+            ),
         ];
         let f = Filter {
             tag: Some("ui".into()),
@@ -289,8 +359,22 @@ mod tests {
     #[test]
     fn filter_by_assigned() {
         let input = vec![
-            t("a", TicketState::Open, None, Some("alice@x"), 1),
-            t("b", TicketState::Open, None, Some("bob@x"), 2),
+            t(
+                "a",
+                TicketStatus::Open,
+                TicketState::New,
+                None,
+                Some("alice@x"),
+                1,
+            ),
+            t(
+                "b",
+                TicketStatus::Open,
+                TicketState::New,
+                None,
+                Some("bob@x"),
+                2,
+            ),
         ];
         let f = Filter {
             assigned: Some("bob@x".into()),
@@ -304,8 +388,22 @@ mod tests {
     #[test]
     fn only_tagged_filters_untagged() {
         let input = vec![
-            t("untagged", TicketState::Open, None, None, 1),
-            t("tagged", TicketState::Open, Some("bug"), None, 2),
+            t(
+                "untagged",
+                TicketStatus::Open,
+                TicketState::New,
+                None,
+                None,
+                1,
+            ),
+            t(
+                "tagged",
+                TicketStatus::Open,
+                TicketState::New,
+                Some("bug"),
+                None,
+                2,
+            ),
         ];
         let f = Filter {
             only_tagged: true,
@@ -319,9 +417,30 @@ mod tests {
     #[test]
     fn default_order_puts_open_first_then_newer_first() {
         let input = vec![
-            t("old-open", TicketState::Open, None, None, 1),
-            t("new-resolved", TicketState::Resolved, None, None, 100),
-            t("new-open", TicketState::Open, None, None, 50),
+            t(
+                "old-open",
+                TicketStatus::Open,
+                TicketState::New,
+                None,
+                None,
+                1,
+            ),
+            t(
+                "new-resolved",
+                TicketStatus::Closed,
+                TicketState::Resolved,
+                None,
+                None,
+                100,
+            ),
+            t(
+                "new-open",
+                TicketStatus::Open,
+                TicketState::New,
+                None,
+                None,
+                50,
+            ),
         ];
         let out = apply(input, &Filter::default());
         assert_eq!(out[0].title, "new-open");
@@ -332,9 +451,9 @@ mod tests {
     #[test]
     fn sort_by_title_desc() {
         let input = vec![
-            t("alpha", TicketState::Open, None, None, 1),
-            t("beta", TicketState::Open, None, None, 2),
-            t("gamma", TicketState::Open, None, None, 3),
+            t("alpha", TicketStatus::Open, TicketState::New, None, None, 1),
+            t("beta", TicketStatus::Open, TicketState::New, None, None, 2),
+            t("gamma", TicketStatus::Open, TicketState::New, None, None, 3),
         ];
         let f = Filter {
             order: Some(SortOrder {
@@ -362,10 +481,17 @@ mod tests {
 
     #[test]
     fn search_matches_title_description_and_comments() {
-        let mut title = t("parser panic", TicketState::Open, None, None, 1);
-        let mut description = t("docs", TicketState::Open, None, None, 2);
+        let title = t(
+            "parser panic",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        let mut description = t("docs", TicketStatus::Open, TicketState::New, None, None, 2);
         description.description = Some("explain parser recovery".into());
-        let mut comment = t("ui", TicketState::Open, None, None, 3);
+        let mut comment = t("ui", TicketStatus::Open, TicketState::New, None, None, 3);
         comment.comments.push(Comment {
             author: "tester".into(),
             at: OffsetDateTime::UNIX_EPOCH,
