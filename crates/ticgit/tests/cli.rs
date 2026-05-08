@@ -177,8 +177,7 @@ fn new_show_and_list_round_trip() {
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("first bug"))
-        .stdout(predicate::str::contains(&id[..6]));
+        .stdout(predicate::str::contains("first bug"));
 
     repo.ti()
         .args(["show", &id, "--filter", ".title"])
@@ -382,6 +381,84 @@ fn checkout_makes_ticket_optional_for_show_and_comment() {
 }
 
 #[test]
+fn close_resolves_current_ticket_and_clears_checkout() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "current close ticket");
+
+    repo.ti().args(["checkout", &id]).assert().success();
+    repo.ti()
+        .arg("close")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleared current ticket"));
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "resolved");
+
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
+fn close_explicit_ticket_keeps_other_checkout() {
+    let repo = TestRepo::new();
+    let current = create_ticket(&repo, "current ticket");
+    let other = create_ticket(&repo, "other ticket");
+
+    repo.ti().args(["checkout", &current]).assert().success();
+    let output = repo
+        .ti()
+        .args(["close", &other, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["id"], other);
+    assert_eq!(json["state"], "resolved");
+
+    repo.ti()
+        .arg("show")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("current ticket"));
+}
+
+#[test]
+fn new_checkout_selects_created_ticket() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["new", "--title", "checked out on create", "--checkout"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Checked out:"));
+
+    let output = repo
+        .ti()
+        .args(["show", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["title"], "checked out on create");
+}
+
+#[test]
 fn list_filters_and_saved_views_work() {
     let repo = TestRepo::new();
     let bug = create_ticket(&repo, "bug ticket");
@@ -420,6 +497,108 @@ fn list_filters_and_saved_views_work() {
         .success()
         .stdout(predicate::str::contains(&bug))
         .stdout(predicate::str::contains(&docs).not());
+}
+
+#[test]
+fn list_search_filters_title_description_and_comments() {
+    let repo = TestRepo::new();
+    let title = create_ticket(&repo, "parser panic");
+    let file = repo.state_file.path().join("description-ticket.md");
+    fs::write(
+        &file,
+        "description ticket\n\nThis ticket explains parser recovery.\n",
+    )
+    .unwrap();
+    let output = repo
+        .ti()
+        .args(["new", "-F"])
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let description: Value = serde_json::from_slice(&output).unwrap();
+    let description_id = description["id"].as_str().unwrap().to_string();
+    let comment = create_ticket(&repo, "comment ticket");
+    repo.ti()
+        .args(["comment", "-t", &comment, "parser appears in a comment"])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "parser", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 3);
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "title:parser", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], title);
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "description:recovery", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], description_id);
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "comments:appears", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], comment);
+}
+
+#[test]
+fn list_all_includes_non_open_tickets() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "closed ticket");
+    repo.ti()
+        .args(["state", "resolved", "-t", &id])
+        .assert()
+        .success();
+
+    repo.ti()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("closed ticket").not());
+
+    repo.ti()
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("closed ticket"));
 }
 
 #[test]

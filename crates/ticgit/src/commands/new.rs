@@ -24,8 +24,12 @@ pub struct Args {
     pub assigned: Option<String>,
 
     /// Initial comment body. Use `--comment-edit` to compose in `$EDITOR`.
-    #[arg(short = 'c', long = "comment")]
+    #[arg(long = "comment")]
     pub comment: Option<String>,
+
+    /// Check out the new ticket after creating it.
+    #[arg(short = 'c', long = "checkout")]
+    pub checkout: bool,
 
     /// Open `$EDITOR` to write the initial comment.
     #[arg(long = "comment-edit", conflicts_with = "comment")]
@@ -63,6 +67,13 @@ pub fn run(args: Args) -> Result<()> {
     };
     let ticket = store.create(&title, opts)?;
 
+    if args.checkout {
+        let git_dir = store.session().repo_git_dir();
+        let mut state = State::load().unwrap_or_default();
+        state.set_current(&git_dir, ticket.id);
+        state.save()?;
+    }
+
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
         return Ok(());
@@ -73,6 +84,9 @@ pub fn run(args: Args) -> Result<()> {
     } else {
         println!("Created ticket {} ({})", ticket.short_id(), ticket.title);
         println!("Full id: {}", ticket.id);
+        if args.checkout {
+            println!("Checked out: {}", ticket.short_id());
+        }
     }
     Ok(())
 }

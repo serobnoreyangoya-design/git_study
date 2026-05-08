@@ -82,13 +82,13 @@ fn tickets_table_with_width(
     const MIN_TITLE_WIDTH: usize = 12;
 
     let fixed_width =
-        ID_WIDTH + STATE_WIDTH + DATE_WIDTH + ASSIGNED_WIDTH + TAGS_WIDTH + GAPS_AND_MARKER;
+        id_width + STATE_WIDTH + DATE_WIDTH + ASSIGNED_WIDTH + TAGS_WIDTH + GAPS_AND_MARKER;
     let title_width = width.saturating_sub(fixed_width).max(MIN_TITLE_WIDTH);
 
     let mut out = String::new();
     let header = format!(
         "  {} {}  {} {} {} {}",
-        fit("TicId", ID_WIDTH),
+        fit("TicId", id_width),
         fit("Date", DATE_WIDTH),
         fit("Title", title_width),
         fit("State", STATE_WIDTH),
@@ -106,7 +106,7 @@ fn tickets_table_with_width(
         let tags = t.tags.iter().cloned().collect::<Vec<_>>().join(",");
         out.push_str(marker);
         out.push(' ');
-        out.push_str(&ansi(ANSI_CYAN, &fit(&t.short_id(), ID_WIDTH)));
+        out.push_str(&styled_ticket_id(t, id_width, ref_lengths));
         out.push(' ');
         out.push_str(&ansi(
             ANSI_DIM,
@@ -213,6 +213,30 @@ fn fit(value: &str, width: usize) -> String {
     format!("{truncated}{}", " ".repeat(padding))
 }
 
+fn styled_ticket_id(
+    ticket: &Ticket,
+    width: usize,
+    ref_lengths: &BTreeMap<uuid::Uuid, usize>,
+) -> String {
+    let hex = ticket.id.to_string().replace('-', "");
+    let display_len = ref_lengths.get(&ticket.id).copied().unwrap_or(6).max(6);
+    let visible: String = hex.chars().take(display_len).collect();
+    let reference_len = ref_lengths
+        .get(&ticket.id)
+        .copied()
+        .unwrap_or(6)
+        .min(visible.len());
+    let (reference, rest) = visible.split_at(reference_len);
+    let padding = width.saturating_sub(visible.len());
+
+    format!(
+        "{}{}{}",
+        ansi(ANSI_YELLOW, reference),
+        ansi(ANSI_CYAN, rest),
+        " ".repeat(padding)
+    )
+}
+
 fn truncate_display(value: &str, max_width: usize) -> String {
     if UnicodeWidthStr::width(value) <= max_width {
         return value.to_string();
@@ -284,4 +308,50 @@ fn friendly_date(when: OffsetDateTime) -> String {
         u8::from(when.month()),
         when.day()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    #[test]
+    fn open_ticket_refs_ignore_closed_ticket_collisions() {
+        let open = ticket(
+            "d7f2d8f6-d6ec-3da1-a180-0a33fb090d59",
+            "open",
+            TicketState::Open,
+        );
+        let other_open = ticket(
+            "d7a2d8f6-d6ec-3da1-a180-0a33fb090d59",
+            "other",
+            TicketState::Open,
+        );
+        let closed = ticket(
+            "d7f99999-d6ec-3da1-a180-0a33fb090d59",
+            "closed",
+            TicketState::Resolved,
+        );
+
+        let refs = open_ticket_ref_lengths(&[open.clone(), other_open, closed]);
+
+        assert_eq!(refs.get(&open.id), Some(&3));
+    }
+
+    fn ticket(id: &str, title: &str, state: TicketState) -> Ticket {
+        Ticket {
+            id: Uuid::parse_str(id).unwrap(),
+            title: title.to_string(),
+            description: None,
+            state,
+            assigned: None,
+            points: None,
+            milestone: None,
+            tags: BTreeSet::new(),
+            comments: Vec::new(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            created_by: "tester@example.com".to_string(),
+        }
+    }
 }
