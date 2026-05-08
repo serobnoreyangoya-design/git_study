@@ -115,12 +115,14 @@ Available filters:
   .points
   .milestone
   .tags
+  .meta
   .comments
   .created_at
   .created_by
 
 Examples:
   ti show <id> --filter '.title'
+  ti show <id> --filter '.meta.branch'
   ti show <id> --filter '.tags'
   ti show <id> --filter '.comments[0].body'"
     );

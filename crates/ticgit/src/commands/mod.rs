@@ -3,11 +3,13 @@
 
 pub mod assign;
 pub mod checkout;
+pub mod close;
 pub mod comment;
 pub mod edit;
 pub mod import;
 pub mod init;
 pub mod list;
+pub mod meta;
 pub mod milestone;
 pub mod new;
 pub mod points;

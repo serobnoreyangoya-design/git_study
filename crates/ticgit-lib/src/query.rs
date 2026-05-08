@@ -15,7 +15,22 @@ pub struct Filter {
     pub tag: Option<String>,
     pub assigned: Option<String>,
     pub only_tagged: bool,
+    pub search: Option<SearchFilter>,
     pub order: Option<SortOrder>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchFilter {
+    pub scope: SearchScope,
+    pub needle: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchScope {
+    Any,
+    Title,
+    Description,
+    Comments,
 }
 
 /// Sort orders accepted by `ti list -o`. Each can be inverted with the
@@ -61,6 +76,72 @@ impl SortOrder {
     }
 }
 
+impl SearchFilter {
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return Ok(SearchFilter {
+                scope: SearchScope::Any,
+                needle: String::new(),
+            });
+        }
+
+        if let Some((scope, needle)) = spec.split_once(':') {
+            if let Some(scope) = SearchScope::parse(scope) {
+                return Ok(SearchFilter {
+                    scope,
+                    needle: needle.to_ascii_lowercase(),
+                });
+            }
+        }
+
+        Ok(SearchFilter {
+            scope: SearchScope::Any,
+            needle: spec.to_ascii_lowercase(),
+        })
+    }
+
+    fn matches(&self, ticket: &Ticket) -> bool {
+        if self.needle.is_empty() {
+            return true;
+        }
+
+        match self.scope {
+            SearchScope::Any => {
+                contains(&ticket.title, &self.needle)
+                    || ticket
+                        .description
+                        .as_deref()
+                        .is_some_and(|description| contains(description, &self.needle))
+                    || ticket
+                        .comments
+                        .iter()
+                        .any(|comment| contains(&comment.body, &self.needle))
+            }
+            SearchScope::Title => contains(&ticket.title, &self.needle),
+            SearchScope::Description => ticket
+                .description
+                .as_deref()
+                .is_some_and(|description| contains(description, &self.needle)),
+            SearchScope::Comments => ticket
+                .comments
+                .iter()
+                .any(|comment| contains(&comment.body, &self.needle)),
+        }
+    }
+}
+
+impl SearchScope {
+    fn parse(scope: &str) -> Option<Self> {
+        match scope.trim().to_ascii_lowercase().as_str() {
+            "title" => Some(SearchScope::Title),
+            "description" | "desc" => Some(SearchScope::Description),
+            "comment" | "comments" => Some(SearchScope::Comments),
+            _ => None,
+        }
+    }
+}
+
 /// Filter and sort `tickets` according to `filter`. Returns a new vec.
 pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     let mut tickets: Vec<Ticket> = tickets
@@ -84,6 +165,11 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
             if filter.only_tagged && t.tags.is_empty() {
                 return false;
             }
+            if let Some(search) = &filter.search {
+                if !search.matches(t) {
+                    return false;
+                }
+            }
             true
         })
         .collect();
@@ -102,6 +188,10 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     }
 
     tickets
+}
+
+fn contains(haystack: &str, needle: &str) -> bool {
+    haystack.to_ascii_lowercase().contains(needle)
 }
 
 fn state_rank(s: TicketState) -> u8 {
@@ -134,7 +224,8 @@ fn compare(a: &Ticket, b: &Ticket, key: SortKey, desc: bool) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use crate::ticket::Comment;
+    use std::collections::{BTreeMap, BTreeSet};
     use time::OffsetDateTime;
     use uuid::Uuid;
 
@@ -158,6 +249,7 @@ mod tests {
             points: None,
             milestone: None,
             tags,
+            meta: BTreeMap::new(),
             comments: vec![],
             created_at: OffsetDateTime::from_unix_timestamp(ts).unwrap(),
             created_by: "tester".into(),
@@ -266,5 +358,47 @@ mod tests {
         assert_eq!(o.key, SortKey::State);
         assert!(o.desc);
         assert!(SortOrder::parse("nonsense").is_none());
+    }
+
+    #[test]
+    fn search_matches_title_description_and_comments() {
+        let mut title = t("parser panic", TicketState::Open, None, None, 1);
+        let mut description = t("docs", TicketState::Open, None, None, 2);
+        description.description = Some("explain parser recovery".into());
+        let mut comment = t("ui", TicketState::Open, None, None, 3);
+        comment.comments.push(Comment {
+            author: "tester".into(),
+            at: OffsetDateTime::UNIX_EPOCH,
+            body: "parser fails on empty input".into(),
+        });
+
+        let out = apply(
+            vec![title.clone(), description.clone(), comment.clone()],
+            &Filter {
+                search: Some(SearchFilter::parse("parser").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 3);
+
+        let out = apply(
+            vec![title.clone(), description.clone(), comment.clone()],
+            &Filter {
+                search: Some(SearchFilter::parse("title:parser").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, title.title);
+
+        let out = apply(
+            vec![title, description, comment.clone()],
+            &Filter {
+                search: Some(SearchFilter::parse("comments:empty").unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, comment.title);
     }
 }

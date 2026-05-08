@@ -154,21 +154,28 @@ impl TicketStore {
             return Err(Error::NoMatch(reference.to_string()));
         }
         let tickets = self.list()?;
-        let mut matches: Vec<Uuid> = tickets
+        let matches: Vec<&Ticket> = tickets
             .iter()
-            .filter_map(|t| {
+            .filter(|t| {
                 let hex = t.id.to_string().replace('-', "");
-                if hex.starts_with(&needle) {
-                    Some(t.id)
-                } else {
-                    None
-                }
+                hex.starts_with(&needle)
             })
             .collect();
         match matches.len() {
             0 => Err(Error::NoMatch(reference.to_string())),
-            1 => Ok(matches.remove(0)),
-            n => Err(Error::Ambiguous(reference.to_string(), n)),
+            1 => Ok(matches[0].id),
+            n => {
+                let open_matches: Vec<&Ticket> = matches
+                    .iter()
+                    .copied()
+                    .filter(|t| t.state == TicketState::Open)
+                    .collect();
+                if open_matches.len() == 1 {
+                    Ok(open_matches[0].id)
+                } else {
+                    Err(Error::Ambiguous(reference.to_string(), n))
+                }
+            }
         }
     }
 
@@ -241,6 +248,24 @@ impl TicketStore {
                 p.remove(&key)?;
             }
         }
+        Ok(())
+    }
+
+    pub fn set_meta(&self, id: &Uuid, field: &str, value: &str) -> Result<()> {
+        let field = field.trim();
+        if field.is_empty() {
+            return Err(Error::InvalidValue(
+                "metadata field cannot be empty".to_string(),
+            ));
+        }
+        if field.contains(':') {
+            return Err(Error::InvalidValue(
+                "metadata field cannot contain `:`".to_string(),
+            ));
+        }
+
+        self.project_handle()
+            .set(&keys::ticket_meta_field(id, field), value)?;
         Ok(())
     }
 
@@ -402,6 +427,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
     let mut points: Option<i64> = None;
     let mut milestone: Option<String> = None;
     let mut tags: BTreeSet<String> = BTreeSet::new();
+    let mut meta: BTreeMap<String, String> = BTreeMap::new();
     let mut comments: Vec<Comment> = Vec::new();
     let mut created_at: Option<OffsetDateTime> = None;
     let mut created_by = String::new();
@@ -418,6 +444,12 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
             ("milestone", MetaValue::String(s)) => milestone = Some(s),
             ("tags", MetaValue::Set(members)) => tags = members,
             ("comments", MetaValue::List(entries)) => comments = decode_comments(entries),
+            (field, MetaValue::String(s)) if field.starts_with("meta:") => {
+                let key = field.trim_start_matches("meta:");
+                if !key.is_empty() {
+                    meta.insert(key.to_string(), s);
+                }
+            }
             ("created-at", MetaValue::String(s)) => {
                 created_at = OffsetDateTime::parse(&s, &Rfc3339).ok();
             }
@@ -438,6 +470,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         points,
         milestone,
         tags,
+        meta,
         comments,
         created_at,
         created_by,
@@ -584,6 +617,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_id_accepts_prefix_unique_among_open_tickets() {
+        let (store, _td) = test_store();
+        let open = Uuid::parse_str("d7f2d8f6-d6ec-3da1-a180-0a33fb090d59").unwrap();
+        let closed = Uuid::parse_str("d7f99999-d6ec-3da1-a180-0a33fb090d59").unwrap();
+        insert_ticket(&store, open, "open", TicketState::Open);
+        insert_ticket(&store, closed, "closed", TicketState::Resolved);
+
+        assert_eq!(store.resolve_id("d7f").unwrap(), open);
+    }
+
+    #[test]
     fn resolve_id_reports_no_match() {
         let (store, _td) = test_store();
         store.create("x", NewTicketOpts::default()).unwrap();
@@ -608,6 +652,18 @@ mod tests {
         just_a.insert(a.id);
         store.save_view("everything", &just_a).unwrap();
         assert_eq!(store.load_view("everything").unwrap(), just_a);
+    }
+
+    fn insert_ticket(store: &TicketStore, id: Uuid, title: &str, state: TicketState) {
+        let p = store.project_handle();
+        let created = OffsetDateTime::UNIX_EPOCH.format(&Rfc3339).unwrap();
+        p.set(&keys::ticket_field(&id, "title"), title).unwrap();
+        p.set(&keys::ticket_field(&id, "state"), state.as_str())
+            .unwrap();
+        p.set(&keys::ticket_field(&id, "created-at"), created.as_str())
+            .unwrap();
+        p.set(&keys::ticket_field(&id, "created-by"), store.email())
+            .unwrap();
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::{Filter, SortOrder, TicketState};
+use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketState};
 
 use crate::commands::{open_store, SessionGitDir};
 use crate::render;
@@ -11,6 +11,10 @@ pub struct Args {
     /// Show only tickets in this state. Defaults to open.
     #[arg(short = 's', long = "state")]
     pub state: Option<String>,
+
+    /// Show all tickets, without the default open-only filter or limit.
+    #[arg(long = "all")]
+    pub all: bool,
 
     /// Show only tickets with this tag.
     #[arg(short = 'g', long = "tag")]
@@ -23,6 +27,10 @@ pub struct Args {
     /// Show only tickets that have at least one tag.
     #[arg(short = 'T', long = "only-tagged")]
     pub only_tagged: bool,
+
+    /// Search title, description, and comments. Use `title:term`, `description:term`, or `comments:term` to scope.
+    #[arg(long = "search")]
+    pub search: Option<String>,
 
     /// Sort order. e.g. `state`, `title.desc`, `created`, `assigned`.
     #[arg(short = 'o', long = "order")]
@@ -44,6 +52,7 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let mut tickets = store.list()?;
+    let open_ref_lengths = render::open_ticket_ref_lengths(&tickets);
 
     if let Some(view_name) = &args.view {
         let ids = store.load_view(view_name)?;
@@ -52,6 +61,7 @@ pub fn run(args: Args) -> Result<()> {
 
     let state = match args.state.as_deref() {
         Some(s) => Some(TicketState::parse(s)?),
+        None if args.all => None,
         None => Some(TicketState::Open),
     };
     let order = match args.order.as_deref() {
@@ -60,16 +70,21 @@ pub fn run(args: Args) -> Result<()> {
         ),
         None => None,
     };
+    let search = match args.search.as_deref() {
+        Some(spec) => Some(SearchFilter::parse(spec).map_err(|e| anyhow::anyhow!(e))?),
+        None => None,
+    };
 
     let filter = Filter {
         state,
         tag: args.tag,
         assigned: args.assigned,
         only_tagged: args.only_tagged,
+        search,
         order,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
-    if args.limit > 0 {
+    if !args.all && args.limit > 0 {
         tickets.truncate(args.limit);
     }
 
@@ -85,6 +100,9 @@ pub fn run(args: Args) -> Result<()> {
 
     let session_state = State::load().unwrap_or_default();
     let current = session_state.current_for(&store.session().repo_git_dir());
-    println!("{}", render::tickets_table(&tickets, current.as_ref()));
+    println!(
+        "{}",
+        render::tickets_table_with_refs(&tickets, current.as_ref(), &open_ref_lengths)
+    );
     Ok(())
 }

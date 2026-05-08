@@ -1,0 +1,44 @@
+use anyhow::Result;
+use clap::Parser;
+use ticgit_lib::TicketState;
+
+use crate::commands::{open_store, resolve_ticket, SessionGitDir};
+use crate::render;
+use crate::session_state::State;
+
+#[derive(Debug, Parser)]
+pub struct Args {
+    /// Ticket id (or prefix). Defaults to the currently checked-out ticket.
+    pub ticket: Option<String>,
+
+    /// Output the updated ticket as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+pub fn run(args: Args) -> Result<()> {
+    let store = open_store()?;
+    let id = resolve_ticket(&store, args.ticket.as_deref())?;
+    store.set_state(&id, TicketState::Resolved)?;
+
+    let git_dir = store.session().repo_git_dir();
+    let mut state = State::load().unwrap_or_default();
+    let cleared_current = state.current_for(&git_dir) == Some(id);
+    if cleared_current {
+        state.clear_current(&git_dir);
+        state.save()?;
+    }
+
+    let ticket = store.load(&id)?;
+    if args.json {
+        println!("{}", render::ticket_json(&ticket)?);
+        return Ok(());
+    }
+
+    if cleared_current {
+        println!("Closed {} and cleared current ticket.", ticket.short_id());
+    } else {
+        println!("Closed {}.", ticket.short_id());
+    }
+    Ok(())
+}

@@ -30,7 +30,7 @@ pub mod ticket;
 pub mod test_support;
 
 pub use error::{Error, Result};
-pub use query::{Filter, SortKey, SortOrder};
+pub use query::{Filter, SearchFilter, SearchScope, SortKey, SortOrder};
 pub use store::TicketStore;
 pub use ticket::{Comment, NewTicketOpts, Ticket, TicketState};
 

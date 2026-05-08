@@ -116,6 +116,43 @@ fn init_is_idempotent() {
 }
 
 #[test]
+fn help_agent_prints_markdown_guide() {
+    let mut cmd = assert_cmd::Command::cargo_bin("ti").expect("ti binary");
+    cmd.args(["help", "--agent"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("---"))
+        .stdout(predicate::str::contains("name: ticgit"))
+        .stdout(predicate::str::contains("# TicGit Agent Guide"))
+        .stdout(predicate::str::contains("ti new -F /tmp/ticket.md"))
+        .stdout(predicate::str::contains("ti state resolved"));
+}
+
+#[test]
+fn version_flags_print_cargo_version() {
+    let expected = format!("ti {}\n", env!("CARGO_PKG_VERSION"));
+
+    for flag in ["-v", "--version"] {
+        let mut cmd = assert_cmd::Command::cargo_bin("ti").expect("ti binary");
+        cmd.arg(flag)
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected.as_str()));
+    }
+}
+
+#[test]
+fn help_lists_sync_but_not_push_or_pull() {
+    let mut cmd = assert_cmd::Command::cargo_bin("ti").expect("ti binary");
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sync"))
+        .stdout(predicate::str::contains(" push ").not())
+        .stdout(predicate::str::contains(" pull ").not());
+}
+
+#[test]
 fn init_bootstraps_git_meta_defaults() {
     let repo = TestRepo::new();
     git(
@@ -156,6 +193,25 @@ fn init_bootstraps_git_meta_defaults() {
 }
 
 #[test]
+fn sync_prints_remote_url_and_ref() {
+    let repo = TestRepo::new();
+    let remote = tempfile::tempdir().expect("bare remote tempdir");
+    git(remote.path(), &["init", "--bare", "--quiet"]);
+    let remote_url = remote.path().to_string_lossy().to_string();
+
+    git(repo.dir.path(), &["remote", "add", "origin", &remote_url]);
+    repo.ti().arg("init").assert().success();
+
+    repo.ti()
+        .arg("sync")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Remote: origin"))
+        .stdout(predicate::str::contains("Ref: refs/meta/main"))
+        .stdout(predicate::str::contains(format!("URL: {remote_url}")));
+}
+
+#[test]
 fn new_show_and_list_round_trip() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "first bug");
@@ -177,8 +233,7 @@ fn new_show_and_list_round_trip() {
         .arg("list")
         .assert()
         .success()
-        .stdout(predicate::str::contains("first bug"))
-        .stdout(predicate::str::contains(&id[..6]));
+        .stdout(predicate::str::contains("first bug"));
 
     repo.ti()
         .args(["show", &id, "--filter", ".title"])
@@ -192,6 +247,30 @@ fn new_show_and_list_round_trip() {
         .success()
         .stdout(predicate::str::contains("Available filters:"))
         .stdout(predicate::str::contains("ti show <id> --filter '.title'"));
+}
+
+#[test]
+fn new_reads_title_and_description_from_file() {
+    let repo = TestRepo::new();
+    let file = repo.state_file.path().join("ticket.md");
+    fs::write(&file, "file title\n\nfile description\nsecond line\n").unwrap();
+
+    let output = repo
+        .ti()
+        .args(["new", "-F"])
+        .arg(&file)
+        .args(["--tags", "agent,feature", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["title"], "file title");
+    assert_eq!(json["description"], "file description\nsecond line");
+    let tags = json["tags"].as_array().unwrap();
+    assert!(tags.iter().any(|tag| tag == "agent"));
+    assert!(tags.iter().any(|tag| tag == "feature"));
 }
 
 #[test]
@@ -222,6 +301,64 @@ fn edit_updates_title_and_description() {
 }
 
 #[test]
+fn edit_reads_title_and_description_from_file() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "old title");
+    let file = repo.state_file.path().join("ticket-edit.md");
+    fs::write(&file, "file edit title\n\nfile edit description\n").unwrap();
+
+    let output = repo
+        .ti()
+        .args(["edit", &id, "-F"])
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["title"], "file edit title");
+    assert_eq!(json["description"], "file edit description");
+}
+
+#[test]
+fn meta_sets_inline_and_file_values() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "metadata ticket");
+    let file = repo.state_file.path().join("meta-value.txt");
+    fs::write(&file, "feature/meta\n").unwrap();
+
+    repo.ti()
+        .args(["meta", "-t", &id, "branch", "feature/parser"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("meta branch: feature/parser"));
+
+    let output = repo
+        .ti()
+        .args(["meta", "-t", &id, "notes", "-F"])
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["meta"]["branch"], "feature/parser");
+    assert_eq!(json["meta"]["notes"], "feature/meta\n");
+
+    repo.ti()
+        .args(["show", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Metadata:"))
+        .stdout(predicate::str::contains("branch"))
+        .stdout(predicate::str::contains("feature/parser"));
+}
+
+#[test]
 fn mutating_commands_update_ticket() {
     let repo = TestRepo::new();
     let id = create_ticket(&repo, "mutate me");
@@ -240,6 +377,10 @@ fn mutating_commands_update_ticket() {
         .success();
     repo.ti()
         .args(["milestone", "-t", &id, "v1"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["meta", "-t", &id, "source", "cli-test"])
         .assert()
         .success();
     repo.ti()
@@ -265,6 +406,7 @@ fn mutating_commands_update_ticket() {
     assert_eq!(json["points"], 5);
     assert_eq!(json["milestone"], "v1");
     assert_eq!(json["tags"].as_array().unwrap().len(), 2);
+    assert_eq!(json["meta"]["source"], "cli-test");
     assert_eq!(json["comments"][0]["body"], "fixed now");
 }
 
@@ -382,6 +524,84 @@ fn checkout_makes_ticket_optional_for_show_and_comment() {
 }
 
 #[test]
+fn close_resolves_current_ticket_and_clears_checkout() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "current close ticket");
+
+    repo.ti().args(["checkout", &id]).assert().success();
+    repo.ti()
+        .arg("close")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleared current ticket"));
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["state"], "resolved");
+
+    repo.ti()
+        .arg("show")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("none checked out"));
+}
+
+#[test]
+fn close_explicit_ticket_keeps_other_checkout() {
+    let repo = TestRepo::new();
+    let current = create_ticket(&repo, "current ticket");
+    let other = create_ticket(&repo, "other ticket");
+
+    repo.ti().args(["checkout", &current]).assert().success();
+    let output = repo
+        .ti()
+        .args(["close", &other, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["id"], other);
+    assert_eq!(json["state"], "resolved");
+
+    repo.ti()
+        .arg("show")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("current ticket"));
+}
+
+#[test]
+fn new_checkout_selects_created_ticket() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["new", "--title", "checked out on create", "--checkout"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Checked out:"));
+
+    let output = repo
+        .ti()
+        .args(["show", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["title"], "checked out on create");
+}
+
+#[test]
 fn list_filters_and_saved_views_work() {
     let repo = TestRepo::new();
     let bug = create_ticket(&repo, "bug ticket");
@@ -420,6 +640,108 @@ fn list_filters_and_saved_views_work() {
         .success()
         .stdout(predicate::str::contains(&bug))
         .stdout(predicate::str::contains(&docs).not());
+}
+
+#[test]
+fn list_search_filters_title_description_and_comments() {
+    let repo = TestRepo::new();
+    let title = create_ticket(&repo, "parser panic");
+    let file = repo.state_file.path().join("description-ticket.md");
+    fs::write(
+        &file,
+        "description ticket\n\nThis ticket explains parser recovery.\n",
+    )
+    .unwrap();
+    let output = repo
+        .ti()
+        .args(["new", "-F"])
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let description: Value = serde_json::from_slice(&output).unwrap();
+    let description_id = description["id"].as_str().unwrap().to_string();
+    let comment = create_ticket(&repo, "comment ticket");
+    repo.ti()
+        .args(["comment", "-t", &comment, "parser appears in a comment"])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "parser", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 3);
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "title:parser", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], title);
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "description:recovery", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], description_id);
+
+    let output = repo
+        .ti()
+        .args(["list", "--search", "comments:appears", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let tickets = json.as_array().unwrap();
+    assert_eq!(tickets.len(), 1);
+    assert_eq!(tickets[0]["id"], comment);
+}
+
+#[test]
+fn list_all_includes_non_open_tickets() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "closed ticket");
+    repo.ti()
+        .args(["state", "resolved", "-t", &id])
+        .assert()
+        .success();
+
+    repo.ti()
+        .arg("list")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("closed ticket").not());
+
+    repo.ti()
+        .args(["list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("closed ticket"));
 }
 
 #[test]

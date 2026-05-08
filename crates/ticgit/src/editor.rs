@@ -1,6 +1,7 @@
 //! `$EDITOR` integration for capturing multi-line input from the user.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -71,4 +72,29 @@ pub fn capture_with_initial(prompt: &str, initial: &str) -> Result<Option<String
     } else {
         Some(cleaned)
     })
+}
+
+/// Read a ticket title/description body from disk. The first line is the
+/// title; remaining lines become the optional description.
+pub fn read_ticket_edit_file(path: &Path) -> Result<(String, Option<String>)> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("reading ticket content from `{}`", path.display()))?;
+    parse_ticket_edit(&raw)
+}
+
+pub fn parse_ticket_edit(raw: &str) -> Result<(String, Option<String>)> {
+    let mut lines = raw.lines();
+    let title = lines.next().unwrap_or_default().trim().to_string();
+    if title.is_empty() {
+        anyhow::bail!("ticket title cannot be empty");
+    }
+
+    let description = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+    let description = if description.is_empty() {
+        None
+    } else {
+        Some(description)
+    };
+
+    Ok((title, description))
 }
