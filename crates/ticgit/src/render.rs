@@ -87,42 +87,65 @@ fn tickets_table_with_width(
 pub fn ticket_detail(t: &Ticket) -> String {
     let mut out = String::new();
     let title_bar = "-".repeat(t.title.chars().count().max(20));
-    out.push_str(&format!("{title_bar}\nTitle    : {}\n", t.title));
-    out.push_str(&format!("Id       : {}\n", t.id));
-    out.push_str(&format!(
-        "Created  : {}  by {}\n",
-        t.created_at.format(&Rfc3339).unwrap_or_default(),
-        t.created_by
+    out.push_str(&ansi(ANSI_DIM, &title_bar));
+    out.push('\n');
+    out.push_str(&detail_field("Title", &ansi(ANSI_BLUE, &t.title)));
+    out.push_str(&detail_field("Id", &ansi(ANSI_CYAN, &t.id.to_string())));
+    out.push_str(&detail_field(
+        "Created",
+        &ansi(
+            ANSI_DIM,
+            &format!(
+                "{} ({})  by {}",
+                friendly_date(t.created_at),
+                relative_date(t.created_at, OffsetDateTime::now_utc()),
+                t.created_by
+            ),
+        ),
     ));
-    out.push_str(&format!("State    : {}\n", t.state));
-    if let Some(description) = &t.description {
-        out.push_str("Description:\n");
-        out.push_str(&format!("  {}\n", description.replace('\n', "\n  ")));
-    }
+    out.push_str(&detail_field(
+        "State",
+        &ansi(state_color(t.state.as_str()), t.state.as_str()),
+    ));
     if let Some(a) = &t.assigned {
-        out.push_str(&format!("Assigned : {a}\n"));
+        out.push_str(&detail_field("Assigned", a));
     }
     if let Some(p) = t.points {
-        out.push_str(&format!("Points   : {p}\n"));
+        out.push_str(&detail_field("Points", &p.to_string()));
     }
     if let Some(m) = &t.milestone {
-        out.push_str(&format!("Milestone: {m}\n"));
+        out.push_str(&detail_field("Milestone", m));
     }
     if !t.tags.is_empty() {
         let tags: Vec<_> = t.tags.iter().cloned().collect();
-        out.push_str(&format!("Tags     : {}\n", tags.join(", ")));
+        out.push_str(&detail_field("Tags", &ansi(ANSI_YELLOW, &tags.join(", "))));
     }
-    out.push_str(&title_bar);
+    out.push_str(&ansi(ANSI_YELLOW, "Description:"));
+    out.push('\n');
+    match t.description.as_deref().filter(|d| !d.trim().is_empty()) {
+        Some(description) => {
+            out.push('\n');
+            out.push_str(&format!("  {}\n", description.replace('\n', "\n  ")));
+        }
+        None => {
+            out.push_str("  ");
+            out.push_str(&ansi(ANSI_DIM, "none"));
+            out.push('\n');
+        }
+    }
+    out.push_str(&ansi(ANSI_DIM, &title_bar));
     out.push('\n');
 
     if t.comments.is_empty() {
-        out.push_str("(no comments)\n");
+        out.push_str(&ansi(ANSI_DIM, "(no comments)"));
+        out.push('\n');
     } else {
         for c in &t.comments {
             out.push_str(&format!(
-                "\n{} - {}\n  {}\n",
-                c.author,
-                c.at.format(&Rfc3339).unwrap_or_default(),
+                "\n{} {} {}\n  {}\n",
+                ansi(ANSI_CYAN, &c.author),
+                ansi(ANSI_DIM, "-"),
+                ansi(ANSI_DIM, &c.at.format(&Rfc3339).unwrap_or_default()),
                 c.body.replace('\n', "\n  "),
             ));
         }
@@ -175,6 +198,14 @@ fn ansi(color: &str, value: &str) -> String {
     format!("{color}{value}{ANSI_RESET}")
 }
 
+fn detail_field(label: &str, value: &str) -> String {
+    format!(
+        "{}{} {value}\n",
+        ansi(ANSI_YELLOW, &format!("{label:<8}")),
+        ansi(ANSI_DIM, ":")
+    )
+}
+
 fn state_color(state: &str) -> &'static str {
     match state {
         "open" => ANSI_GREEN,
@@ -199,4 +230,13 @@ fn relative_date(then: OffsetDateTime, now: OffsetDateTime) -> String {
         return format!("{}mo", seconds / (60 * 60 * 24 * 30));
     }
     format!("{}y", seconds / (60 * 60 * 24 * 365))
+}
+
+fn friendly_date(when: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02}",
+        when.year(),
+        u8::from(when.month()),
+        when.day()
+    )
 }
