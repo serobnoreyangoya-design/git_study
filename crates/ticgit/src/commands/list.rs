@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketState};
+use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketLifecycle, TicketStatus};
 
 use crate::commands::{open_store, SessionGitDir};
 use crate::render;

@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::error::{Error, Result};
 use crate::keys;
-use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState};
+use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
 
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {

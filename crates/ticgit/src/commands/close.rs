@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::TicketState;
+use ticgit_lib::{TicketState, TicketStatus};
 
 use crate::commands::{open_store, resolve_ticket, SessionGitDir};
 use crate::render;

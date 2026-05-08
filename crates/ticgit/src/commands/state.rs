@@ -1,14 +1,19 @@
-use anyhow::Result;
+use std::io::{self, IsTerminal};
+
+use anyhow::{bail, Context, Result};
 use clap::Parser;
-use ticgit_lib::TicketState;
+use dialoguer::theme::ColorfulTheme;
+use dialoguer::Select;
+use ticgit_lib::{Ticket, TicketLifecycle, TicketState};
 
 use crate::commands::{open_store, resolve_ticket};
 use crate::render;
 
 #[derive(Debug, Parser)]
 pub struct Args {
-    /// New state: open, resolved, invalid, or hold.
-    pub state: String,
+    /// New lifecycle value: status, state, or status:state.
+    /// When omitted, choose interactively from a list (requires a terminal).
+    pub lifecycle: Option<String>,
 
     /// Ticket id (or prefix). Defaults to the currently checked-out ticket.
     #[arg(short = 't', long = "ticket")]
