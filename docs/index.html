@@ -313,6 +313,36 @@
         border-bottom: 0;
       }
 
+      .install-divider {
+        border: none;
+        border-top: 1px solid var(--rule);
+        margin: 0;
+      }
+
+      .install-cmd {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .copy-btn {
+        background: none;
+        border: 1px solid var(--rule);
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 14px;
+        padding: 2px 6px;
+        line-height: 1;
+        border-radius: 3px;
+        flex-shrink: 0;
+      }
+
+      .copy-btn:hover {
+        color: var(--fg);
+        border-color: var(--fg);
+      }
+
       .install-check {
         border-top: 1px solid var(--rule);
         padding: 10px 12px 12px;
@@ -455,11 +485,18 @@
           </div>
           <div class="install-grid">
             <div>SCRIPT</div>
-            <div>curl -fsSL https://ticgit.dev/install | sh</div>
+            <div class="install-cmd">
+              <span>curl -fsSL https://ticgit.dev/install | sh</span>
+              <button class="copy-btn" onclick="navigator.clipboard.writeText('curl -fsSL https://ticgit.dev/install | sh')" title="Copy">&#x2398;</button>
+            </div>
           </div>
+          <hr class="install-divider">
           <div class="install-grid">
             <div>CARGO</div>
-            <div>cargo install ticgit</div>
+            <div class="install-cmd">
+              <span>cargo install ticgit</span>
+              <button class="copy-btn" onclick="navigator.clipboard.writeText('cargo install ticgit')" title="Copy">&#x2398;</button>
+            </div>
           </div>
           <div class="install-check">
             <div class="line">
