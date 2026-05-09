@@ -9,13 +9,13 @@ read or migrate legacy `ticgit-ng` branches.
 
 ## Install
 
-From a checkout:
+Download a pre-built binary:
 
 ```sh
-cargo install --path crates/ticgit
+curl -fsSL https://ticgit.dev/install | sh
 ```
 
-After the crates are published:
+Or install from source via Cargo:
 
 ```sh
 cargo install ticgit
