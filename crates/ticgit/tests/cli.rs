@@ -491,7 +491,7 @@ fn edit_updates_title_and_description() {
     let editor = editor_script(&repo, "new title\n\nnew description\nsecond line\n");
 
     repo.ti()
-        .env("EDITOR", editor)
+        .env("GIT_EDITOR", &editor)
         .args(["edit", &id])
         .assert()
         .success()

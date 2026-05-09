@@ -16,13 +16,7 @@ pub fn capture(prompt: &str) -> Result<Option<String>> {
 /// Open `$EDITOR` with editable initial content followed by comment-only
 /// instructions. Lines beginning with `#` are stripped from the result.
 pub fn capture_with_initial(prompt: &str, initial: &str) -> Result<Option<String>> {
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-        if cfg!(windows) {
-            "notepad".to_string()
-        } else {
-            "vi".to_string()
-        }
-    });
+    let editor = resolve_editor();
 
     let mut tf = tempfile::Builder::new()
         .prefix("ticgit-")
@@ -45,9 +39,7 @@ pub fn capture_with_initial(prompt: &str, initial: &str) -> Result<Option<String
     tf.flush().context("flushing prompt")?;
 
     let path = tf.path().to_path_buf();
-    let status = Command::new(&editor)
-        .arg(&path)
-        .status()
+    let status = spawn_editor(&editor, &path)
         .with_context(|| format!("spawning editor `{editor}`"))?;
     if !status.success() {
         anyhow::bail!("editor `{editor}` exited with status {status}");
@@ -72,6 +64,68 @@ pub fn capture_with_initial(prompt: &str, initial: &str) -> Result<Option<String
     } else {
         Some(cleaned)
     })
+}
+
+/// Spawn the editor, running through the shell so that editor values
+/// like `"code --wait"` or `"emacsclient -t"` work correctly (matching
+/// Git's behavior).
+fn spawn_editor(editor: &str, path: &Path) -> Result<std::process::ExitStatus> {
+    let path_str = path.display().to_string();
+    if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", &format!("{editor} \"{path_str}\"")])
+            .status()
+            .map_err(Into::into)
+    } else {
+        Command::new("sh")
+            .args(["-c", &format!("{editor} \"$@\""), "--", &path_str])
+            .status()
+            .map_err(Into::into)
+    }
+}
+
+/// Resolve the editor using Git's precedence:
+///   1. `$GIT_EDITOR`
+///   2. `git config core.editor`
+///   3. `$VISUAL`
+///   4. `$EDITOR`
+///   5. `vi` (or `notepad` on Windows)
+fn resolve_editor() -> String {
+    if let Ok(e) = std::env::var("GIT_EDITOR") {
+        if !e.is_empty() {
+            return e;
+        }
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["config", "core.editor"])
+        .output()
+    {
+        if output.status.success() {
+            let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !val.is_empty() {
+                return val;
+            }
+        }
+    }
+
+    if let Ok(e) = std::env::var("VISUAL") {
+        if !e.is_empty() {
+            return e;
+        }
+    }
+
+    if let Ok(e) = std::env::var("EDITOR") {
+        if !e.is_empty() {
+            return e;
+        }
+    }
+
+    if cfg!(windows) {
+        "notepad".to_string()
+    } else {
+        "vi".to_string()
+    }
 }
 
 /// Read a ticket title/description body from disk. The first line is the
