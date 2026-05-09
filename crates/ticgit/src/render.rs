@@ -178,6 +178,10 @@ pub fn ticket_detail(t: &Ticket) -> String {
     if let Some(m) = &t.milestone {
         out.push_str(&detail_field("Milestone", m));
     }
+    if let Some(spec) = &t.spec {
+        let first_line = spec.lines().next().unwrap_or("");
+        out.push_str(&detail_field("Spec", &ansi(ANSI_DIM, first_line)));
+    }
     if !t.tags.is_empty() {
         let tags: Vec<_> = t.tags.iter().cloned().collect();
         out.push_str(&detail_field("Tags", &ansi(ANSI_YELLOW, &tags.join(", "))));
@@ -770,6 +774,7 @@ mod tests {
             id: Uuid::parse_str(id).unwrap(),
             title: title.to_string(),
             description: None,
+            spec: None,
             status: state.status(),
             state,
             assigned: None,

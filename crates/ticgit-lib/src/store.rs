@@ -204,6 +204,20 @@ impl TicketStore {
         Ok(())
     }
 
+    pub fn set_spec(&self, id: &Uuid, spec: Option<&str>) -> Result<()> {
+        let p = self.project_handle();
+        let key = keys::ticket_field(id, "spec");
+        match spec {
+            Some(s) if !s.is_empty() => {
+                p.set(&key, s)?;
+            }
+            _ => {
+                p.remove(&key)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_state(&self, id: &Uuid, state: TicketState) -> Result<()> {
         self.set_lifecycle(id, state.status(), state)
     }
@@ -435,6 +449,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
 
     let mut title: Option<String> = None;
     let mut description: Option<String> = None;
+    let mut spec: Option<String> = None;
     let mut status: Option<TicketStatus> = None;
     let mut state: Option<TicketState> = None;
     let mut legacy_status: Option<TicketStatus> = None;
@@ -452,6 +467,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         match (field.as_str(), value) {
             ("title", MetaValue::String(s)) => title = Some(s),
             ("description", MetaValue::String(s)) => description = Some(s),
+            ("spec", MetaValue::String(s)) => spec = Some(s),
             ("status", MetaValue::String(s)) => {
                 status = TicketStatus::parse(&s).ok();
             }
@@ -507,6 +523,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         id,
         title,
         description,
+        spec,
         status,
         state,
         assigned,

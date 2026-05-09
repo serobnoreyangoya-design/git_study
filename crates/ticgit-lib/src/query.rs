@@ -270,6 +270,7 @@ mod tests {
             id: Uuid::new_v4(),
             title: title.into(),
             description: None,
+            spec: None,
             status,
             state,
             assigned: assigned.map(String::from),

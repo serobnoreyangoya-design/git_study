@@ -25,6 +25,7 @@
         "id",
         "title",
         "description",
+        "spec",
         "status",
         "state",
         "assigned",
@@ -45,6 +46,12 @@
           "type": "string"
         },
         "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "spec": {
           "type": [
             "string",
             "null"

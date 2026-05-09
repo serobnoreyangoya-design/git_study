@@ -149,6 +149,7 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
             "id".to_string(),
             "title".to_string(),
             "description".to_string(),
+            "spec".to_string(),
             "status".to_string(),
             "state".to_string(),
             "assigned".to_string(),
