@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use clap::Parser;
-use ticgit_lib::{Filter, SortOrder, TicketState};
+use ticgit_lib::{Filter, SortOrder, TicketLifecycle, TicketStatus};
 
 use crate::commands::open_store;
 
@@ -11,9 +11,13 @@ pub struct SaveArgs {
     /// View name to write.
     pub name: String,
 
-    /// Include only tickets in this state.
+    /// Include only tickets in this status/state.
     #[arg(short = 's', long = "state")]
     pub state: Option<String>,
+
+    /// Include only tickets in this broad status.
+    #[arg(long = "status")]
+    pub status: Option<String>,
 
     /// Include only tickets with this tag.
     #[arg(short = 'g', long = "tag")]
@@ -41,10 +45,18 @@ pub struct ListArgs {
 pub fn run_save(args: SaveArgs) -> Result<()> {
     let store = open_store()?;
     let tickets = store.list()?;
-    let state = match args.state.as_deref() {
-        Some(s) => Some(TicketState::parse(s)?),
+    let mut status = match args.status.as_deref() {
+        Some(s) => Some(TicketStatus::parse(s)?),
         None => None,
     };
+    let mut state = None;
+    if let Some(spec) = args.state.as_deref() {
+        let lifecycle = TicketLifecycle::parse(spec)?;
+        status = Some(lifecycle.status);
+        if TicketStatus::parse(spec).is_err() {
+            state = Some(lifecycle.state);
+        }
+    }
     let order = match args.order.as_deref() {
         Some(spec) => Some(
             SortOrder::parse(spec).ok_or_else(|| anyhow::anyhow!("unknown sort order `{spec}`"))?,
@@ -52,6 +64,7 @@ pub fn run_save(args: SaveArgs) -> Result<()> {
         None => None,
     };
     let filter = Filter {
+        status,
         state,
         tag: args.tag,
         assigned: args.assigned,

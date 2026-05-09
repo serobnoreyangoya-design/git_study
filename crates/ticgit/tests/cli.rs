@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -125,7 +126,160 @@ fn help_agent_prints_markdown_guide() {
         .stdout(predicate::str::contains("name: ticgit"))
         .stdout(predicate::str::contains("# TicGit Agent Guide"))
         .stdout(predicate::str::contains("ti new -F /tmp/ticket.md"))
-        .stdout(predicate::str::contains("ti state resolved"));
+        .stdout(predicate::str::contains("ti list --markdown"))
+        .stdout(predicate::str::contains("Prefer `--markdown`"))
+        .stdout(predicate::str::contains("ti state closed"));
+}
+
+#[test]
+fn machine_output_schema_is_published_and_matches_cli_contract() {
+    let schema: Value = serde_json::from_str(include_str!("../../../docs/schema/v1.json")).unwrap();
+    assert_eq!(schema["$id"], "https://ticgit.dev/schema/v1.json");
+    assert_eq!(schema["$defs"]["ticket"]["additionalProperties"], false);
+
+    let required: BTreeSet<_> = schema["$defs"]["ticket"]["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        required,
+        BTreeSet::from([
+            "id".to_string(),
+            "title".to_string(),
+            "description".to_string(),
+            "status".to_string(),
+            "state".to_string(),
+            "assigned".to_string(),
+            "points".to_string(),
+            "milestone".to_string(),
+            "tags".to_string(),
+            "meta".to_string(),
+            "comments".to_string(),
+            "created_at".to_string(),
+            "created_by".to_string(),
+        ])
+    );
+    assert!(schema["$defs"]["ticket"]["properties"]["state"]["enum"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|state| state == "blocked"));
+    assert_eq!(
+        schema["$defs"]["ticket"]["properties"]["meta"]["additionalProperties"]["type"],
+        "string"
+    );
+
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "schema ticket");
+    repo.ti()
+        .args(["meta", "-t", &id, "branch", "feature/schema"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &id, "schema note"])
+        .assert()
+        .success();
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ticket: Value = serde_json::from_slice(&output).unwrap();
+    let ticket_keys: BTreeSet<_> = ticket
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|key| key.to_string())
+        .collect();
+    assert_eq!(ticket_keys, required);
+    assert_eq!(ticket["id"], id);
+    assert_eq!(ticket["status"], "open");
+    assert_eq!(ticket["state"], "new");
+    assert_eq!(ticket["meta"]["branch"], "feature/schema");
+    assert_eq!(ticket["comments"][0]["body"], "schema note");
+
+    let output = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: Value = serde_json::from_slice(&output).unwrap();
+    let first = &list.as_array().unwrap()[0];
+    assert_eq!(first["id"], id);
+    assert_eq!(first.as_object().unwrap().len(), required.len());
+}
+
+#[test]
+fn json_machine_mode_keeps_stdout_parseable_and_plain() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "machine ticket");
+
+    for args in [
+        vec!["show", &id, "--json"],
+        vec!["list", "--json"],
+        vec!["state", "blocked", "-t", &id, "--json"],
+    ] {
+        let output = repo
+            .ti()
+            .args(args)
+            .assert()
+            .success()
+            .stderr(predicate::eq(""))
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(output).unwrap();
+        assert!(
+            !stdout.contains("\x1b["),
+            "JSON stdout must not contain ANSI escape sequences: {stdout:?}"
+        );
+        serde_json::from_str::<Value>(&stdout).expect("machine stdout is valid JSON");
+    }
+}
+
+#[test]
+fn json_machine_mode_errors_use_stderr_without_stdout() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["show", "ffffffff", "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""))
+        .stderr(predicate::str::contains(
+            "ticket prefix `ffffffff` matches no ticket",
+        ));
+}
+
+#[test]
+fn ambiguous_ticket_prefixes_fail_cleanly_in_machine_mode() {
+    let repo = TestRepo::new();
+    let mut prefixes: std::collections::BTreeMap<char, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let ambiguous_prefix = (0..64).find_map(|i| {
+        let id = create_ticket(&repo, &format!("ambiguous {i}"));
+        let prefix = id.chars().next().unwrap();
+        let ids = prefixes.entry(prefix).or_default();
+        ids.push(id);
+        (ids.len() == 2).then_some(prefix.to_string())
+    });
+    let ambiguous_prefix = ambiguous_prefix.expect("created two tickets with same leading hex");
+
+    repo.ti()
+        .args(["show", &ambiguous_prefix, "--json"])
+        .assert()
+        .failure()
+        .stdout(predicate::eq(""))
+        .stderr(predicate::str::contains("ambiguous"));
 }
 
 #[test]
@@ -227,7 +381,8 @@ fn new_show_and_list_round_trip() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["id"], id);
     assert_eq!(json["title"], "first bug");
-    assert_eq!(json["state"], "open");
+    assert_eq!(json["status"], "open");
+    assert_eq!(json["state"], "new");
 
     repo.ti()
         .arg("list")
@@ -247,6 +402,60 @@ fn new_show_and_list_round_trip() {
         .success()
         .stdout(predicate::str::contains("Available filters:"))
         .stdout(predicate::str::contains("ti show <id> --filter '.title'"));
+}
+
+#[test]
+fn markdown_output_includes_ticket_data_and_next_commands() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "markdown ticket");
+
+    repo.ti()
+        .args(["meta", "-t", &id, "branch", "feature/markdown"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["comment", "-t", &id, "markdown note"])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["show", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Ticket: markdown ticket"))
+        .stdout(predicate::str::contains(format!("- Id: `{id}`")))
+        .stdout(predicate::str::contains("feature/markdown"))
+        .stdout(predicate::str::contains("markdown note"))
+        .stdout(predicate::str::contains("## Next Commands"))
+        .stdout(predicate::str::contains("ti checkout"));
+
+    repo.ti()
+        .args(["list", "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Tickets"))
+        .stdout(predicate::str::contains(
+            "| Id | Title | Status | State | Assigned | Tags | Created |",
+        ))
+        .stdout(predicate::str::contains("## Ticket Details"))
+        .stdout(predicate::str::contains("ti show"));
+
+    repo.ti()
+        .args(["state", "blocked", "-t", &id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("- Status: `open`"))
+        .stdout(predicate::str::contains("- State: `blocked`"))
+        .stdout(predicate::str::contains("ti state closed"));
+
+    repo.ti().args(["checkout", &id]).assert().success();
+    repo.ti()
+        .args(["checkout", "--clear", "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Current Ticket"))
+        .stdout(predicate::str::contains("- Current: none"))
+        .stdout(predicate::str::contains("ti list --markdown"));
 }
 
 #[test]
@@ -401,6 +610,7 @@ fn mutating_commands_update_ticket() {
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "closed");
     assert_eq!(json["state"], "resolved");
     assert_eq!(json["assigned"], "tester@example.com");
     assert_eq!(json["points"], 5);
@@ -483,14 +693,15 @@ fn ticket_mutations_support_json_output() {
 
     let output = repo
         .ti()
-        .args(["state", "hold", "-t", &id, "--json"])
+        .args(["state", "blocked", "-t", &id, "--json"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["state"], "hold");
+    assert_eq!(json["status"], "open");
+    assert_eq!(json["state"], "blocked");
 
     let output = repo
         .ti()
@@ -502,6 +713,79 @@ fn ticket_mutations_support_json_output() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["id"], id);
+}
+
+#[test]
+fn state_and_status_commands_accept_status_state_and_combined_values() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "lifecycle ticket");
+
+    let output = repo
+        .ti()
+        .args(["state", "closed", "-t", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "closed");
+    assert_eq!(json["state"], "resolved");
+
+    let output = repo
+        .ti()
+        .args(["status", "open:blocked", "-t", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "open");
+    assert_eq!(json["state"], "blocked");
+
+    let output = repo
+        .ti()
+        .args(["state", "closed:wontfix", "-t", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "closed");
+    assert_eq!(json["state"], "wontfix");
+
+    repo.ti()
+        .args(["status", "review", "-t", &id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("open:review"));
+}
+
+#[test]
+fn state_without_value_requires_tty_stdin() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "lifecycle menu");
+
+    repo.ti()
+        .args(["state", "-t", &id])
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("missing STATE"));
+}
+
+#[test]
+fn state_without_value_rejects_json_without_explicit_state() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "json state");
+
+    repo.ti()
+        .args(["state", "-t", &id, "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--json"));
 }
 
 #[test]
@@ -544,6 +828,7 @@ fn close_resolves_current_ticket_and_clears_checkout() {
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["status"], "closed");
     assert_eq!(json["state"], "resolved");
 
     repo.ti()
@@ -570,6 +855,7 @@ fn close_explicit_ticket_keeps_other_checkout() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["id"], other);
+    assert_eq!(json["status"], "closed");
     assert_eq!(json["state"], "resolved");
 
     repo.ti()
@@ -737,11 +1023,16 @@ fn list_all_includes_non_open_tickets() {
         .success()
         .stdout(predicate::str::contains("closed ticket").not());
 
-    repo.ti()
-        .args(["list", "--all"])
+    let output = repo
+        .ti()
+        .args(["list", "--all", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("closed ticket"));
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json.as_array().unwrap()[0]["title"], "closed ticket");
 }
 
 #[test]

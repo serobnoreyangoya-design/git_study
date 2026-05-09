@@ -17,8 +17,11 @@ pub enum Error {
     #[error("ticket prefix `{0}` matches no ticket")]
     NoMatch(String),
 
-    #[error("invalid ticket state `{0}` (expected one of: open, resolved, invalid, hold)")]
+    #[error("invalid ticket state `{0}` (expected one of: new, assigned, in-progress, blocked, review, resolved, wontfix, duplicate, invalid)")]
     InvalidState(String),
+
+    #[error("invalid ticket status `{0}` (expected one of: open, closed)")]
+    InvalidStatus(String),
 
     #[error("invalid value: {0}")]
     InvalidValue(String),

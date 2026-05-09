@@ -25,6 +25,10 @@ pub struct Args {
     /// Output the updated ticket as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output the updated ticket as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -41,6 +45,10 @@ pub fn run(args: Args) -> Result<()> {
     let ticket = store.load(&id)?;
     if args.json {
         println!("{}", render::ticket_json(&ticket)?);
+        return Ok(());
+    }
+    if args.markdown {
+        println!("{}", render::ticket_markdown(&ticket));
         return Ok(());
     }
 

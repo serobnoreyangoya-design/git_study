@@ -14,7 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use ticgit_lib::{query, Filter, NewTicketOpts, Ticket, TicketState, TicketStore};
+use ticgit_lib::{query, Filter, NewTicketOpts, Ticket, TicketState, TicketStatus, TicketStore};
 use time::format_description::well_known::Rfc3339;
 
 use crate::commands::open_store;
@@ -140,7 +140,7 @@ impl App {
         self.tickets = query::apply(
             self.store.list()?,
             &Filter {
-                state: Some(TicketState::Open),
+                status: Some(TicketStatus::Open),
                 ..Default::default()
             },
         );
@@ -310,6 +310,7 @@ impl App {
                     created_by_display(ticket)
                 ),
             ),
+            field_line("Status", ticket.status.as_str()),
             field_line("State", ticket.state.as_str()),
         ];
         if let Some(assigned) = &ticket.assigned {
@@ -409,23 +410,44 @@ impl App {
     }
 
     fn draw_state_modal(&self, frame: &mut Frame<'_>) {
-        let area = centered_rect(42, 9, frame.area());
+        let area = centered_rect(48, 15, frame.area());
         let lines = vec![
             Line::from(vec![
-                Span::styled("o", Style::default().fg(Color::Yellow)),
-                Span::raw(" open"),
+                Span::styled("n", Style::default().fg(Color::Yellow)),
+                Span::raw(" open:new"),
             ]),
             Line::from(vec![
+                Span::styled("a", Style::default().fg(Color::Yellow)),
+                Span::raw(" open:assigned"),
+            ]),
+            Line::from(vec![
+                Span::styled("p", Style::default().fg(Color::Yellow)),
+                Span::raw(" open:in-progress"),
+            ]),
+            Line::from(vec![
+                Span::styled("b", Style::default().fg(Color::Yellow)),
+                Span::raw(" open:blocked"),
+            ]),
+            Line::from(vec![
+                Span::styled("v", Style::default().fg(Color::Yellow)),
+                Span::raw(" open:review"),
+            ]),
+            Line::raw(""),
+            Line::from(vec![
                 Span::styled("r", Style::default().fg(Color::Yellow)),
-                Span::raw(" resolved"),
+                Span::raw(" closed:resolved"),
+            ]),
+            Line::from(vec![
+                Span::styled("w", Style::default().fg(Color::Yellow)),
+                Span::raw(" closed:wontfix"),
+            ]),
+            Line::from(vec![
+                Span::styled("u", Style::default().fg(Color::Yellow)),
+                Span::raw(" closed:duplicate"),
             ]),
             Line::from(vec![
                 Span::styled("i", Style::default().fg(Color::Yellow)),
-                Span::raw(" invalid"),
-            ]),
-            Line::from(vec![
-                Span::styled("h", Style::default().fg(Color::Yellow)),
-                Span::raw(" hold"),
+                Span::raw(" closed:invalid"),
             ]),
             Line::raw(""),
             Line::from(Span::styled(
@@ -609,10 +631,33 @@ impl App {
                 self.mode = Mode::Normal;
                 self.status = Some("Cancelled.".to_string());
             }
-            KeyCode::Char('o') | KeyCode::Char('1') => self.set_state(TicketState::Open)?,
-            KeyCode::Char('r') | KeyCode::Char('2') => self.set_state(TicketState::Resolved)?,
-            KeyCode::Char('i') | KeyCode::Char('3') => self.set_state(TicketState::Invalid)?,
-            KeyCode::Char('h') | KeyCode::Char('4') => self.set_state(TicketState::Hold)?,
+            KeyCode::Char('n') | KeyCode::Char('1') => {
+                self.set_lifecycle(TicketStatus::Open, TicketState::New)?
+            }
+            KeyCode::Char('a') | KeyCode::Char('2') => {
+                self.set_lifecycle(TicketStatus::Open, TicketState::Assigned)?
+            }
+            KeyCode::Char('p') | KeyCode::Char('3') => {
+                self.set_lifecycle(TicketStatus::Open, TicketState::InProgress)?
+            }
+            KeyCode::Char('b') | KeyCode::Char('4') => {
+                self.set_lifecycle(TicketStatus::Open, TicketState::Blocked)?
+            }
+            KeyCode::Char('v') | KeyCode::Char('5') => {
+                self.set_lifecycle(TicketStatus::Open, TicketState::Review)?
+            }
+            KeyCode::Char('r') | KeyCode::Char('6') => {
+                self.set_lifecycle(TicketStatus::Closed, TicketState::Resolved)?
+            }
+            KeyCode::Char('w') | KeyCode::Char('7') => {
+                self.set_lifecycle(TicketStatus::Closed, TicketState::Wontfix)?
+            }
+            KeyCode::Char('u') | KeyCode::Char('8') => {
+                self.set_lifecycle(TicketStatus::Closed, TicketState::Duplicate)?
+            }
+            KeyCode::Char('i') | KeyCode::Char('9') => {
+                self.set_lifecycle(TicketStatus::Closed, TicketState::Invalid)?
+            }
             _ => {}
         }
         Ok(())
@@ -732,15 +777,15 @@ impl App {
         Ok(true)
     }
 
-    fn set_state(&mut self, state: TicketState) -> Result<()> {
+    fn set_lifecycle(&mut self, status: TicketStatus, state: TicketState) -> Result<()> {
         let Some(ticket) = self.selected_ticket() else {
             self.status = Some("Select a ticket first.".to_string());
             self.mode = Mode::Normal;
             return Ok(());
         };
         let id = ticket.id;
-        self.store.set_state(&id, state)?;
-        self.status = Some(format!("Changed state to {state}."));
+        self.store.set_lifecycle(&id, status, state)?;
+        self.status = Some(format!("Changed lifecycle to {status}:{state}."));
         self.mode = Mode::Normal;
         self.reload(Some(id))?;
         Ok(())

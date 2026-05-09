@@ -27,6 +27,7 @@ ticgit-lib = { version = "0.1.0", path = "../ticgit-lib" }
 
 anyhow      = { workspace = true }
 clap        = { workspace = true }
+dialoguer   = { workspace = true }
 crossterm   = { workspace = true }
 dirs        = { workspace = true }
 gix         = { workspace = true }
