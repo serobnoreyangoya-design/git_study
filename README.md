@@ -4,8 +4,6 @@ TicGit is a Git-native issue tracker. Tickets live in the repository as
 structured [git-meta](https://crates.io/crates/git-meta-lib) metadata instead of
 files on an orphan branch.
 
-This is a clean Rust reimplementation of the old `ticgit-ng` idea. It does not
-read or migrate legacy `ticgit-ng` branches.
 
 ## Install
 
@@ -251,10 +249,3 @@ cargo publish -p ticgit
 
 The CLI crate depends on `ticgit-lib` by both local `path` and published
 `version`, so publish `ticgit-lib` first.
-
-## Notes
-
-This project intentionally avoids the old `ticgit-ng` branch format. The new
-format uses structured string, set, and list values with deterministic git-meta
-merge behavior, which keeps ticket metadata queryable locally and shareable via
-Git refs.
