@@ -14,6 +14,7 @@ pub mod milestone;
 pub mod new;
 pub mod points;
 pub mod recent;
+pub mod setup;
 pub mod show;
 pub mod state;
 pub mod sync;
@@ -28,7 +29,10 @@ use uuid::Uuid;
 use crate::session_state::State;
 
 /// Open a ticket store rooted at the repo discovered from the current dir.
+/// If no git-meta remote is configured but a `.git-meta` file exists,
+/// auto-runs setup first so things just work after a fresh clone.
 pub fn open_store() -> Result<TicketStore> {
+    let _ = setup::auto_setup_if_needed();
     TicketStore::discover().context("opening ticgit store (are you inside a git repository?)")
 }
 

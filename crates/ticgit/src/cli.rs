@@ -28,6 +28,9 @@ pub enum Command {
     /// Initialise ticgit metadata on the current repo (idempotent).
     Init,
 
+    /// Configure git-meta remote from `.git-meta` file (idempotent).
+    Setup,
+
     /// Create a new ticket.
     New(commands::new::Args),
 
@@ -95,6 +98,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         None => commands::list::run(commands::list::Args::default()),
         Some(Command::Init) => commands::init::run(),
+        Some(Command::Setup) => commands::setup::run(),
         Some(Command::New(args)) => commands::new::run(args),
         Some(Command::List(args)) => commands::list::run(args),
         Some(Command::Show(args)) => commands::show::run(args),
