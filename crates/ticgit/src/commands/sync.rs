@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::process::Command;
 
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use uuid::Uuid;
 
 use crate::commands::open_store;
 
@@ -32,10 +34,46 @@ pub fn run_sync(args: Args) -> Result<()> {
         println!("Web URL: {web_url}");
     }
 
+    // Snapshot before pull
+    let before: BTreeMap<Uuid, String> = store
+        .list()?
+        .into_iter()
+        .map(|t| (t.id, t.title.clone()))
+        .collect();
+
     store.pull(args.remote.as_deref())?;
+
+    // Snapshot after pull to find new tickets
+    let after: BTreeMap<Uuid, String> = store
+        .list()?
+        .into_iter()
+        .map(|t| (t.id, t.title.clone()))
+        .collect();
+
+    let new_tickets: Vec<(&Uuid, &String)> = after
+        .iter()
+        .filter(|(id, _)| !before.contains_key(id))
+        .collect();
+
+    if new_tickets.is_empty() {
+        println!("Pull: no new tickets.");
+    } else {
+        println!("Pull: {} new ticket(s):", new_tickets.len());
+        for (id, title) in new_tickets.iter().take(5) {
+            let short: String = id.to_string().chars().take(6).collect();
+            println!("  {short}  {title}");
+        }
+        if new_tickets.len() > 5 {
+            println!("  ... and {} more", new_tickets.len() - 5);
+        }
+    }
+
     store.push(args.remote.as_deref())?;
 
-    println!("Synced ticgit metadata.");
+    let total = after.len();
+    println!("Push: {total} ticket(s) synced.");
+
+    println!("Done.");
     Ok(())
 }
 
