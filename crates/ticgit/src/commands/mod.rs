@@ -19,6 +19,7 @@ pub mod show;
 pub mod state;
 pub mod sync;
 pub mod tag;
+pub mod update;
 pub mod tui;
 pub mod view;
 

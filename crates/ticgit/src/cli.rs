@@ -92,6 +92,9 @@ pub enum Command {
 
     /// Sync ticket metadata with a Git remote (pull then push).
     Sync(commands::sync::Args),
+
+    /// Update ti to the latest release.
+    Update(commands::update::Args),
 }
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {
@@ -119,5 +122,6 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::SaveView(args)) => commands::view::run_save(args),
         Some(Command::Views(args)) => commands::view::run_list(args),
         Some(Command::Sync(args)) => commands::sync::run_sync(args),
+        Some(Command::Update(args)) => commands::update::run(args),
     }
 }
