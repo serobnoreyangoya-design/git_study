@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ticket fields - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li class="active"><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>TICKET FIELDS</span>
+          </div>
+        </header>
+
+        <h1>Ticket Fields</h1>
+        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti meta</code>, <code>ti edit</code></p>
+        <p>Every ticket has a set of built-in fields. These commands let you set them without opening an editor.</p>
+
+        <h2>Tags</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>ADD TAGS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti tag bug</div>
+            <div class="line"><span class="prompt">$</span> ti tag "bug,urgent"</div>
+            <div class="line"><span class="prompt">$</span> ti tag --ticket a3f security compliance</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>REMOVE TAGS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti tag --remove bug</div>
+            <div class="line"><span class="prompt">$</span> ti tag -d urgent</div>
+          </div>
+        </div>
+
+        <p>Tags are useful for filtering:</p>
+        <div class="terminal">
+          <div class="term-header"><span>FILTER BY TAG</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --tag bug</div>
+            <div class="line"><span class="prompt">$</span> ti list --only-tagged</div>
+          </div>
+        </div>
+
+        <h2>Assign</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>ASSIGN</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti assign alice@example.com</div>
+            <div class="line"><span class="prompt">$</span> ti assign --ticket a3f bob@example.com</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti assign --clear</div>
+            <div class="line dim">Removes the assignee.</div>
+          </div>
+        </div>
+
+        <p>In list output, the email domain is stripped for readability (<code>alice@example.com</code> shows as <code>alice</code>).</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>FILTER BY ASSIGNEE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --assigned alice@example.com</div>
+          </div>
+        </div>
+
+        <h2>Points</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>POINTS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti points 5</div>
+            <div class="line"><span class="prompt">$</span> ti points --ticket a3f 8</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti points --clear</div>
+          </div>
+        </div>
+
+        <h2>Milestone</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>MILESTONE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti milestone v2.0</div>
+            <div class="line"><span class="prompt">$</span> ti milestone --ticket a3f "sprint-14"</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti milestone --clear</div>
+          </div>
+        </div>
+
+        <h2>Spec</h2>
+        <p>The spec field holds implementation specifications -- the "how", separate from the description's "what/why". Set it via <code>ti edit</code> or programmatically.</p>
+        <p>When a spec is set, <code>ti show</code> displays its first line:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SPEC IN SHOW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show a3f</div>
+            <div class="line dim">-----------------------------------------------------------</div>
+            <div class="line dim">Title&nbsp;&nbsp;&nbsp;: Refactor auth middleware</div>
+            <div class="line dim">...</div>
+            <div class="line dim">Spec&nbsp;&nbsp;&nbsp;&nbsp;: Use RS256 tokens with 24h expiry, rotate via cron</div>
+            <div class="line dim">...</div>
+          </div>
+        </div>
+
+        <h2>Custom metadata</h2>
+        <p>For anything that doesn't fit the built-in fields, use <code>ti meta</code> to set arbitrary key-value pairs:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>META</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti meta branch feature/auth-refactor</div>
+            <div class="line"><span class="prompt">$</span> ti meta priority P0</div>
+            <div class="line"><span class="prompt">$</span> ti meta --ticket a3f source "customer-report"</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti meta spec-doc --file design.md</div>
+          </div>
+        </div>
+
+        <p>Custom metadata shows up in <code>ti show</code> output and in JSON:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>READ META</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show a3f --filter .meta.branch</div>
+            <div class="line dim">feature/auth-refactor</div>
+          </div>
+        </div>
+
+        <h2>All fields in JSON</h2>
+        <p>The full ticket schema is at <a href="https://ticgit.dev/schema/v1.json">ticgit.dev/schema/v1.json</a>. A ticket object looks like:</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>TICKET SCHEMA</span></div>
+          <div class="term-body">
+            <div class="line">{</div>
+            <div class="line">&nbsp;&nbsp;"id": "a3f29c84-...",</div>
+            <div class="line">&nbsp;&nbsp;"title": "fix parser panic",</div>
+            <div class="line">&nbsp;&nbsp;"description": "Panics on empty input...",</div>
+            <div class="line">&nbsp;&nbsp;"spec": null,</div>
+            <div class="line">&nbsp;&nbsp;"status": "open",</div>
+            <div class="line">&nbsp;&nbsp;"state": "in-progress",</div>
+            <div class="line">&nbsp;&nbsp;"assigned": "alice@example.com",</div>
+            <div class="line">&nbsp;&nbsp;"points": 5,</div>
+            <div class="line">&nbsp;&nbsp;"milestone": "v2.0",</div>
+            <div class="line">&nbsp;&nbsp;"tags": ["bug", "urgent"],</div>
+            <div class="line">&nbsp;&nbsp;"meta": { "branch": "feature/fix-parser" },</div>
+            <div class="line">&nbsp;&nbsp;"comments": [...],</div>
+            <div class="line">&nbsp;&nbsp;"created_at": "2026-05-01T10:30:00Z",</div>
+            <div class="line">&nbsp;&nbsp;"created_by": "bob@example.com"</div>
+            <div class="line">}</div>
+          </div>
+        </div>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

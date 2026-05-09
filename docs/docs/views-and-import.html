@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>views &amp; import - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li class="active"><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>VIEWS &amp; IMPORT</span>
+          </div>
+        </header>
+
+        <h1>Views and Import</h1>
+        <p>Commands: <code>ti save-view</code>, <code>ti views</code>, <code>ti import</code></p>
+
+        <h2>Saved views</h2>
+        <p>Views are named collections of tickets based on filter criteria. They let you save a query you run often.</p>
+
+        <h3>Create a view</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>SAVE VIEW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti save-view bugs --tag bug --status open</div>
+            <div class="line dim">Saved view: bugs (3 tickets)</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti save-view my-work --assigned alice@example.com --status open</div>
+            <div class="line dim">Saved view: my-work (7 tickets)</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti save-view blocked --state blocked</div>
+            <div class="line dim">Saved view: blocked (2 tickets)</div>
+          </div>
+        </div>
+
+        <h3>List saved views</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>LIST VIEWS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti views</div>
+            <div class="line dim">bugs</div>
+            <div class="line dim">my-work</div>
+            <div class="line dim">blocked</div>
+          </div>
+        </div>
+
+        <h3>Show a view's tickets</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>VIEW DETAIL</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti views bugs</div>
+            <div class="line dim">a3f29c84-...</div>
+            <div class="line dim">d91c3a12-...</div>
+            <div class="line dim">7b2e4f9a-...</div>
+          </div>
+        </div>
+
+        <h3>Use a view in list</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>LIST WITH VIEW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --view bugs</div>
+            <div class="line dim">&nbsp;&nbsp;TicId&nbsp;&nbsp;Date&nbsp;&nbsp;&nbsp;Title&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Status&nbsp;State&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Tags</div>
+            <div class="line dim">----------------------------------------------------------------------</div>
+            <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;2d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fix parser panic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;in-progress&nbsp;bug</div>
+            <div class="line dim">&nbsp;&nbsp;d91c3a&nbsp;5d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;null pointer in export&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+            <div class="line dim">&nbsp;&nbsp;7b2e4f&nbsp;8d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;crash on large input&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;assigned&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+          </div>
+        </div>
+
+        <h2>Import from GitHub</h2>
+        <p>Pull open issues from a GitHub repository into TicGit. Requires the <a href="https://cli.github.com/">GitHub CLI</a> (<code>gh</code>).</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>GITHUB IMPORT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti import gh --repo owner/repo</div>
+            <div class="line dim">Imported 12 ticket(s) from owner/repo</div>
+            <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;&nbsp;fix parser panic on empty input</div>
+            <div class="line dim">&nbsp;&nbsp;d91c3a&nbsp;&nbsp;null pointer in CSV export</div>
+            <div class="line dim">&nbsp;&nbsp;7b2e4f&nbsp;&nbsp;crash on large input files</div>
+            <div class="line dim">&nbsp;&nbsp;... and 9 more</div>
+          </div>
+        </div>
+
+        <p>What gets imported:</p>
+        <ul>
+          <li>Issue title becomes the ticket title</li>
+          <li>Issue body, GitHub URL, author, and assignees go into the description</li>
+          <li>Issue labels become tags (plus <code>github</code> and <code>github-issue</code>)</li>
+          <li>First GitHub assignee becomes the ticket assignee</li>
+          <li>Issue milestone becomes the ticket milestone</li>
+        </ul>
+
+        <h3>Limit the import</h3>
+        <div class="terminal">
+          <div class="term-header"><span>OPTIONS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti import gh --repo owner/repo --limit 50</div>
+            <div class="line"><span class="prompt">$</span> ti import gh --repo owner/repo --json</div>
+          </div>
+        </div>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

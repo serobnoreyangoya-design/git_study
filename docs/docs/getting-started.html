@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>getting started - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li class="active"><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>GETTING STARTED</span>
+          </div>
+        </header>
+
+        <h1>Getting Started</h1>
+
+        <p>TicGit is a distributed issue tracker that stores tickets directly in your Git repository as metadata. No server, no database, no separate account -- just Git.</p>
+
+        <h2>Install</h2>
+
+        <div class="terminal">
+          <div class="term-header"><span>INSTALL</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> curl -fsSL https://ticgit.dev/install | sh</div>
+          </div>
+        </div>
+
+        <p>Or with Cargo:</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>CARGO</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> cargo install ticgit</div>
+          </div>
+        </div>
+
+        <h2>Setup</h2>
+
+        <h3>New project</h3>
+        <p>Initialize TicGit in any Git repository:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>INIT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> cd my-project</div>
+            <div class="line"><span class="prompt">$</span> ti init</div>
+            <div class="line dim">Initialised ticgit metadata (schema v1).</div>
+          </div>
+        </div>
+
+        <p>That's it. Start creating tickets.</p>
+
+        <h3>Cloned project</h3>
+        <p>If someone has already set up TicGit on a repo and added a <code>.git-meta</code> file, just run:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SETUP</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti setup</div>
+            <div class="line dim">Configured git-meta remote from .git-meta: git@github.com:owner/repo.git</div>
+          </div>
+        </div>
+
+        <p>Or if the repo already has a <code>.git-meta</code> file, <code>ti</code> will auto-configure on first use.</p>
+
+        <h3>Sync</h3>
+        <p>Pull and push ticket data with <code>ti sync</code>:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SYNC</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+            <div class="line dim">Remote: origin</div>
+            <div class="line dim">Ref: refs/meta/main</div>
+            <div class="line dim">URL: git@github.com:owner/repo.git</div>
+            <div class="line dim">Web URL: https://github.com/owner/repo</div>
+            <div class="line dim">Pull: 3 new ticket(s):</div>
+            <div class="line dim">&nbsp;&nbsp;a07da7&nbsp;&nbsp;resolved tickets remain checked out after close</div>
+            <div class="line dim">&nbsp;&nbsp;9b8039&nbsp;&nbsp;Implement `ti context` for agent workflows</div>
+            <div class="line dim">&nbsp;&nbsp;5d607a&nbsp;&nbsp;Link tickets to branches, commits, and PRs</div>
+            <div class="line dim">Push: 23 ticket(s) synced.</div>
+            <div class="line ok">Done.</div>
+          </div>
+        </div>
+
+        <h2>Quick workflow</h2>
+        <p>Create a ticket, work on it, close it:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>FULL WORKFLOW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "fix the parser" --tags bug</div>
+            <div class="line dim">Created: a3f29c</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti list</div>
+            <div class="line dim">&nbsp;&nbsp;TicId&nbsp;&nbsp;Date&nbsp;&nbsp;&nbsp;Title&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Status&nbsp;State&nbsp;&nbsp;&nbsp;Tags</div>
+            <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;0d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fix the parser&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti checkout a3f</div>
+            <div class="line dim">Checked out: a3f29c  fix the parser</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti comment "root cause is the empty-input path"</div>
+            <div class="line"><span class="prompt">$</span> ti state in-progress</div>
+            <div class="line"><span class="prompt">$</span> ti comment "fixed, added test coverage"</div>
+            <div class="line"><span class="prompt">$</span> ti close</div>
+            <div class="line dim">Closed: a3f29c  fix the parser</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+          </div>
+        </div>
+
+        <h2>Ticket identity</h2>
+        <p>Every ticket gets a UUID. You can refer to a ticket by any unique prefix of that UUID:</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>ID PREFIXES</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show a3f</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f29c</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f29c84-d6ec-3da1-a180-0a33fb090d59</div>
+          </div>
+        </div>
+
+        <p>All three refer to the same ticket. TicGit will tell you if a prefix is ambiguous.</p>
+
+        <h2>Checked-out ticket</h2>
+        <p>Many commands default to the "currently checked-out" ticket, so you don't have to keep passing <code>--ticket</code>:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>CHECKOUT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti checkout a3f</div>
+            <div class="line"><span class="prompt">$</span> ti comment "this applies to a3f"</div>
+            <div class="line"><span class="prompt">$</span> ti tag bug</div>
+            <div class="line"><span class="prompt">$</span> ti assign alice@example.com</div>
+            <div class="line"><span class="prompt">$</span> ti state in-progress</div>
+          </div>
+        </div>
+
+        <p>Clear it with <code>ti checkout --clear</code>.</p>
+
+        <h2>Output formats</h2>
+        <p>Every read command supports <code>--json</code> and <code>--markdown</code>:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>FORMATS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --json</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f --json</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f --markdown</div>
+          </div>
+        </div>
+
+        <p>JSON output goes to stdout with no ANSI escapes, so it's safe to pipe:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>PIPING</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --json | jq '.[].title'</div>
+            <div class="line dim">"fix the parser"</div>
+            <div class="line dim">"update docs"</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f --filter .title</div>
+            <div class="line dim">fix the parser</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f --filter .comments[0].body</div>
+            <div class="line dim">root cause is the empty-input path</div>
+          </div>
+        </div>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

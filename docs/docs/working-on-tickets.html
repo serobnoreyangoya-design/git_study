@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>working on tickets - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li class="active"><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>WORKING ON TICKETS</span>
+          </div>
+        </header>
+
+        <h1>Working on Tickets</h1>
+        <p>Commands: <code>ti checkout</code>, <code>ti edit</code>, <code>ti comment</code>, <code>ti state</code>, <code>ti close</code></p>
+
+        <h2>Checkout</h2>
+        <p>Select a ticket as your "current" ticket. Most commands default to the checked-out ticket when you don't pass <code>--ticket</code>.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>CHECKOUT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti checkout a3f</div>
+            <div class="line dim">Checked out: a3f29c  fix the parser</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti show</div>
+            <div class="line dim">(shows a3f29c without needing to specify it)</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti comment "working on this now"</div>
+            <div class="line dim">(comment added to a3f29c)</div>
+          </div>
+        </div>
+
+        <p>Clear the checkout:</p>
+        <div class="terminal">
+          <div class="term-header"><span>CLEAR</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti checkout --clear</div>
+          </div>
+        </div>
+        <p>The checked-out ticket is marked with <code>*</code> in <code>ti list</code> output.</p>
+
+        <h2>Edit title and description</h2>
+        <p>Open the ticket in your editor to change the title and description:</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>EDIT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti edit a3f</div>
+            <div class="line"><span class="prompt">$</span> ti edit --file updated.txt</div>
+          </div>
+        </div>
+        <p>The file format is the same as <code>ti new --file</code>: first line is the title, blank line, then description.</p>
+
+        <h2>Comments</h2>
+
+        <h3>Inline</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>COMMENT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti comment "found the root cause, it's in the tokenizer"</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti comment --ticket a3f "this is specific to ticket a3f"</div>
+          </div>
+        </div>
+
+        <h3>Editor</h3>
+        <div class="terminal">
+          <div class="term-header"><span>EDITOR COMMENT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti comment</div>
+            <div class="line dim">Opens $EDITOR for longer comments.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti comment --edit</div>
+            <div class="line dim">Force editor even when passing text.</div>
+          </div>
+        </div>
+
+        <h2>Lifecycle: status and state</h2>
+        <p>Tickets have two lifecycle dimensions:</p>
+
+        <p><strong>Status</strong> -- broad bucket: <code>open</code> (active work) or <code>closed</code> (done).</p>
+
+        <p><strong>State</strong> -- specific position in the lifecycle:</p>
+
+        <table>
+          <thead>
+            <tr><th>Open states</th><th>Closed states</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>new</code></td><td><code>resolved</code></td></tr>
+            <tr><td><code>assigned</code></td><td><code>wontfix</code></td></tr>
+            <tr><td><code>in-progress</code></td><td><code>duplicate</code></td></tr>
+            <tr><td><code>blocked</code></td><td><code>invalid</code></td></tr>
+            <tr><td><code>review</code></td><td></td></tr>
+          </tbody>
+        </table>
+
+        <h3>Change state</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>STATE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti state in-progress</div>
+            <div class="line"><span class="prompt">$</span> ti state blocked</div>
+            <div class="line"><span class="prompt">$</span> ti state review</div>
+          </div>
+        </div>
+        <p>State automatically sets the correct status (e.g., <code>resolved</code> sets status to <code>closed</code>).</p>
+
+        <h3>Be explicit about both</h3>
+        <div class="terminal">
+          <div class="term-header"><span>STATUS:STATE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti state closed:wontfix</div>
+            <div class="line"><span class="prompt">$</span> ti state open:blocked</div>
+          </div>
+        </div>
+
+        <h3>Close a ticket</h3>
+        <p><code>ti close</code> is shorthand for <code>ti state resolved</code>:</p>
+        <div class="terminal dark">
+          <div class="term-header"><span>CLOSE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti close a3f</div>
+            <div class="line dim">Closed: a3f29c  fix the parser</div>
+          </div>
+        </div>
+
+        <h2>Common workflow</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>END-TO-END WORKFLOW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "fix parser panic on empty input" --tags bug</div>
+            <div class="line dim">Created: a3f29c</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti checkout a3f</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti state assigned</div>
+            <div class="line"><span class="prompt">$</span> ti assign alice@example.com</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti state in-progress</div>
+            <div class="line"><span class="prompt">$</span> ti comment "reproducing locally"</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti comment "fix is in commit e7a2b1f"</div>
+            <div class="line"><span class="prompt">$</span> ti state review</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti close</div>
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+          </div>
+        </div>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

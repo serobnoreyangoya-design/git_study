@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent integration - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li class="active"><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>AGENT INTEGRATION</span>
+          </div>
+        </header>
+
+        <h1>Agent Integration</h1>
+        <p>TicGit is designed to work with AI coding agents. Every command that reads or writes data supports <code>--json</code> and <code>--markdown</code> output.</p>
+
+        <h2>For agents: getting started</h2>
+        <p>Run <code>ti help --agent</code> for a Markdown guide written for agents, covering the full command set with structured output examples.</p>
+
+        <h2>JSON workflow</h2>
+        <p>Agents should use <code>--json</code> for all reads and writes:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>READ JSON</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --json</div>
+            <div class="line dim">[</div>
+            <div class="line dim">&nbsp;&nbsp;{</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;"id": "3d3a5d72-109d-47fa-a91d-0c7ff5d00b4a",</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;"title": "Add spec field to tickets",</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;"status": "open",</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;"state": "new",</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;"tags": ["feature"],</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;...</div>
+            <div class="line dim">&nbsp;&nbsp;}</div>
+            <div class="line dim">]</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SHOW JSON</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show 3d3 --json</div>
+            <div class="line dim">{</div>
+            <div class="line dim">&nbsp;&nbsp;"id": "3d3a5d72-...",</div>
+            <div class="line dim">&nbsp;&nbsp;"title": "Add spec field to tickets",</div>
+            <div class="line dim">&nbsp;&nbsp;"description": null,</div>
+            <div class="line dim">&nbsp;&nbsp;"status": "open",</div>
+            <div class="line dim">&nbsp;&nbsp;"state": "new",</div>
+            <div class="line dim">&nbsp;&nbsp;"comments": [</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;{</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"author": "schacon@gmail.com",</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"at": "2026-05-09T10:46:38.649Z",</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"body": "Add a top-level 'spec' field..."</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;}</div>
+            <div class="line dim">&nbsp;&nbsp;],</div>
+            <div class="line dim">&nbsp;&nbsp;...</div>
+            <div class="line dim">}</div>
+          </div>
+        </div>
+
+        <h2>Markdown workflow</h2>
+        <p><code>--markdown</code> output includes next-step command suggestions, useful for agents that need guidance on what to do next:</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>MARKDOWN</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show 3d3 --markdown</div>
+          </div>
+        </div>
+
+        <h2>Extract specific fields</h2>
+        <p>Use <code>--filter</code> with jq-like paths:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>FILTER</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show 3d3 --filter .title</div>
+            <div class="line dim">Add spec field to tickets</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti show 3d3 --filter .comments[0].body</div>
+            <div class="line dim">Add a top-level 'spec' field...</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti show 3d3 --filter .tags</div>
+            <div class="line dim">["feature"]</div>
+          </div>
+        </div>
+
+        <h2>Create and update tickets</h2>
+        <p>All write commands return the updated ticket as JSON when you pass <code>--json</code>:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>WRITE JSON</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "fix the bug" --tags bug --json</div>
+            <div class="line dim">{"id":"a3f29c84-...","title":"fix the bug","status":"open",...}</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti comment --ticket a3f "root cause identified" --json</div>
+            <div class="line dim">{"id":"a3f29c84-...","comments":[...],...}</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti state --ticket a3f in-progress --json</div>
+            <div class="line dim">{"id":"a3f29c84-...","state":"in-progress",...}</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti tag --ticket a3f urgent --json</div>
+            <div class="line dim">{"id":"a3f29c84-...","tags":["bug","urgent"],...}</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti close a3f --json</div>
+            <div class="line dim">{"id":"a3f29c84-...","status":"closed","state":"resolved",...}</div>
+          </div>
+        </div>
+
+        <h2>ID-only creation</h2>
+        <p>When an agent just needs the ticket ID:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>ID ONLY</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "automated finding" --id-only</div>
+            <div class="line dim">a3f29c84-d6ec-3da1-a180-0a33fb090d59</div>
+          </div>
+        </div>
+
+        <h2>Piping and scripting</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SCRIPTING</span></div>
+          <div class="term-body">
+            <div class="line dim"># Get all open bug titles</div>
+            <div class="line"><span class="prompt">$</span> ti list --tag bug --json | jq -r '.[].title'</div>
+            <div class="line">&nbsp;</div>
+            <div class="line dim"># Count tickets by state</div>
+            <div class="line"><span class="prompt">$</span> ti list --all --json | jq 'group_by(.state) | map({state: .[0].state, count: length})'</div>
+            <div class="line">&nbsp;</div>
+            <div class="line dim"># Bulk close tickets matching a pattern</div>
+            <div class="line"><span class="prompt">$</span> ti list --json | jq -r '.[] | select(.title | test("cleanup")) | .id' | \</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;xargs -I{} ti close {}</div>
+          </div>
+        </div>
+
+        <h2>Schema</h2>
+        <p>The full JSON schema is published at <a href="https://ticgit.dev/schema/v1.json">ticgit.dev/schema/v1.json</a>. All JSON output conforms to this schema.</p>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

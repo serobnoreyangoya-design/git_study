@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sync &amp; setup - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li class="active"><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>SYNC &amp; SETUP</span>
+          </div>
+        </header>
+
+        <h1>Sync and Setup</h1>
+        <p>Commands: <code>ti sync</code>, <code>ti init</code>, <code>ti setup</code>, <code>ti update</code></p>
+
+        <h2>How TicGit stores data</h2>
+        <p>TicGit stores tickets as <a href="https://git-meta.com">git-meta</a> metadata, which lives in a separate Git ref (<code>refs/meta/main</code>). This means:</p>
+        <ul>
+          <li>Tickets don't clutter your working tree or commit history</li>
+          <li>They sync with <code>git push</code>/<code>git pull</code> on the meta ref</li>
+          <li>Multiple people can work on tickets offline and merge later</li>
+          <li>The full ticket history is in the repo, not on a server</li>
+        </ul>
+
+        <h2>ti init</h2>
+        <p>Initialize TicGit on a repository for the first time:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>INIT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> cd my-project</div>
+            <div class="line"><span class="prompt">$</span> ti init</div>
+            <div class="line dim">Initialised ticgit metadata (schema v1).</div>
+          </div>
+        </div>
+        <p>This is idempotent -- running it again is safe.</p>
+
+        <h2>ti setup</h2>
+        <p>If the repo has a <code>.git-meta</code> file (a one-line file with the remote URL), <code>ti setup</code> configures the git-meta remote:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SETUP</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> cat .git-meta</div>
+            <div class="line dim">git@github.com:owner/repo.git</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti setup</div>
+            <div class="line dim">Configured git-meta remote from .git-meta: git@github.com:owner/repo.git</div>
+          </div>
+        </div>
+        <p>This also happens automatically the first time you run any <code>ti</code> command in a repo with a <code>.git-meta</code> file.</p>
+
+        <h2>ti sync</h2>
+        <p>Sync pulls remote ticket changes, then pushes your local changes:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SYNC</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+            <div class="line dim">Remote: origin</div>
+            <div class="line dim">Ref: refs/meta/main</div>
+            <div class="line dim">URL: git@github.com:owner/repo.git</div>
+            <div class="line dim">Web URL: https://github.com/owner/repo</div>
+            <div class="line dim">Pull: 3 new ticket(s):</div>
+            <div class="line dim">&nbsp;&nbsp;a07da7&nbsp;&nbsp;resolved tickets remain checked out after close</div>
+            <div class="line dim">&nbsp;&nbsp;9b8039&nbsp;&nbsp;Implement `ti context` for agent workflows</div>
+            <div class="line dim">&nbsp;&nbsp;5d607a&nbsp;&nbsp;Link tickets to branches, commits, and PRs</div>
+            <div class="line dim">Push: 23 ticket(s) synced.</div>
+            <div class="line ok">Done.</div>
+          </div>
+        </div>
+
+        <p>When there's nothing new:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SYNC (NO CHANGES)</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+            <div class="line dim">Remote: origin</div>
+            <div class="line dim">Ref: refs/meta/main</div>
+            <div class="line dim">URL: git@github.com:owner/repo.git</div>
+            <div class="line dim">Web URL: https://github.com/owner/repo</div>
+            <div class="line dim">Pull: no new tickets.</div>
+            <div class="line dim">Push: 9 ticket(s) synced.</div>
+            <div class="line ok">Done.</div>
+          </div>
+        </div>
+
+        <h3>Specify a remote</h3>
+        <div class="terminal">
+          <div class="term-header"><span>REMOTE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti sync --remote upstream</div>
+          </div>
+        </div>
+        <p>By default, <code>ti sync</code> uses the first remote with <code>remote.&lt;name&gt;.meta = true</code> in your git config, falling back to <code>origin</code>.</p>
+
+        <h2>ti update</h2>
+        <div class="terminal">
+          <div class="term-header"><span>UPDATE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti update</div>
+            <div class="line"><span class="prompt">$</span> ti update --check</div>
+            <div class="line dim">Check for updates without installing.</div>
+          </div>
+        </div>
+
+        <h2>Team workflow</h2>
+        <p>A typical team setup:</p>
+
+        <p><strong>1. One person initializes TicGit and adds the <code>.git-meta</code> file:</strong></p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>TEAM INIT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti init</div>
+            <div class="line"><span class="prompt">$</span> echo "git@github.com:team/project.git" > .git-meta</div>
+            <div class="line"><span class="prompt">$</span> git add .git-meta && git commit -m "add git-meta config"</div>
+            <div class="line"><span class="prompt">$</span> git push</div>
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+          </div>
+        </div>
+
+        <p><strong>2. Everyone else clones and starts using tickets:</strong></p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>TEAM CLONE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> git clone git@github.com:team/project.git</div>
+            <div class="line"><span class="prompt">$</span> cd project</div>
+            <div class="line"><span class="prompt">$</span> ti list</div>
+            <div class="line dim">Auto-setup kicks in, pulls tickets.</div>
+          </div>
+        </div>
+
+        <p><strong>3. Sync regularly:</strong></p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>KEEP IN SYNC</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti sync</div>
+            <div class="line dim">Before and after working on tickets.</div>
+          </div>
+        </div>
+
+        <p>Since tickets are just Git data, conflicts are handled by git-meta's merge strategy. In practice, conflicts are rare because tickets use structured fields rather than free-form text files.</p>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

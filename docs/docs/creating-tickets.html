@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>creating &amp; browsing - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li class="active"><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>CREATE &amp; BROWSE</span>
+          </div>
+        </header>
+
+        <h1>Creating and Browsing Tickets</h1>
+        <p>Commands: <code>ti new</code>, <code>ti list</code>, <code>ti show</code>, <code>ti recent</code>, <code>ti tui</code></p>
+
+        <h2>Creating tickets</h2>
+
+        <h3>Interactive (editor)</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>EDITOR</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new</div>
+            <div class="line dim">Opens $EDITOR. First line = title, blank line, then description.</div>
+          </div>
+        </div>
+
+        <h3>Inline</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>INLINE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "fix the parser" --tags bug</div>
+            <div class="line dim">Created: a3f29c</div>
+          </div>
+        </div>
+
+        <h3>With all the trimmings</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>FULL OPTIONS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "refactor auth middleware" \</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;--tags "refactor,security" \</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;--assigned alice@example.com \</div>
+            <div class="line">&nbsp;&nbsp;&nbsp;&nbsp;--comment "Blocked on the new token spec"</div>
+            <div class="line dim">Created: 7b2e4f</div>
+          </div>
+        </div>
+
+        <h3>From a file</h3>
+        <p>Write a file where line 1 is the title and the rest (after a blank line) is the description:</p>
+        <div class="terminal dark">
+          <div class="term-header"><span>FILE INPUT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> cat ticket.txt</div>
+            <div class="line dim">Migrate to new token format</div>
+            <div class="line dim"></div>
+            <div class="line dim">The old JWT tokens use HS256 which doesn't meet the new</div>
+            <div class="line dim">compliance requirements. Switch to RS256.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti new --file ticket.txt --tags "security,compliance"</div>
+            <div class="line dim">Created: d91c3a</div>
+          </div>
+        </div>
+
+        <h3>Machine-friendly</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>MACHINE OUTPUT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "automated ticket" --id-only</div>
+            <div class="line dim">d91c3a84-7f2d-4e1b-a180-0a33fb090d59</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti new --title "another one" --json</div>
+            <div class="line dim">{"id":"e5f7a2...","title":"another one","status":"open",...}</div>
+          </div>
+        </div>
+
+        <h2>Listing tickets</h2>
+
+        <h3>Default view (open tickets)</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>TI LIST</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list</div>
+            <div class="line dim">&nbsp;&nbsp;TicId&nbsp;&nbsp;Date&nbsp;&nbsp;&nbsp;Title&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Status&nbsp;State&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Tags</div>
+            <div class="line dim">----------------------------------------------------------------------------------------------------</div>
+            <div class="line dim">&nbsp;&nbsp;3d3a5d&nbsp;0d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Add spec field to tickets ...&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;feature</div>
+            <div class="line dim">&nbsp;&nbsp;e416bd&nbsp;0d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Simplify views functionality&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;feature</div>
+            <div class="line dim">&nbsp;&nbsp;9722d2&nbsp;0d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Implement sub-tickets (par...&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;feature</div>
+            <div class="line dim">&nbsp;&nbsp;9b8039&nbsp;23h&nbsp;&nbsp;&nbsp;&nbsp;Implement `ti context`...&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;agent,context</div>
+            <div class="line dim">&nbsp;&nbsp;5d607a&nbsp;23h&nbsp;&nbsp;&nbsp;&nbsp;Link tickets to branches...&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;agent,feature,git</div>
+          </div>
+        </div>
+        <p>By default, <code>ti list</code> shows open tickets, newest first, capped at 20.</p>
+
+        <h3>Show everything</h3>
+        <div class="terminal">
+          <div class="term-header"><span>ALL TICKETS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --all</div>
+          </div>
+        </div>
+        <p>Removes the open-only filter and the 20-ticket limit.</p>
+
+        <h3>Filter by state</h3>
+        <div class="terminal">
+          <div class="term-header"><span>FILTERS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --state in-progress</div>
+            <div class="line"><span class="prompt">$</span> ti list --state blocked</div>
+            <div class="line"><span class="prompt">$</span> ti list --status closed</div>
+          </div>
+        </div>
+        <p>State accepts: <code>new</code>, <code>assigned</code>, <code>in-progress</code>, <code>blocked</code>, <code>review</code>, <code>resolved</code>, <code>wontfix</code>, <code>duplicate</code>, <code>invalid</code>. Status accepts <code>open</code> or <code>closed</code>.</p>
+
+        <h3>Filter by tag or assignee</h3>
+        <div class="terminal">
+          <div class="term-header"><span>TAG / ASSIGNEE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --tag bug</div>
+            <div class="line"><span class="prompt">$</span> ti list --assigned alice@example.com</div>
+            <div class="line"><span class="prompt">$</span> ti list --only-tagged</div>
+          </div>
+        </div>
+
+        <h3>Search</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>SEARCH</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --search "parser"</div>
+            <div class="line dim">Searches title, description, and comments.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti list --search "title:parser"</div>
+            <div class="line"><span class="prompt">$</span> ti list --search "comments:workaround"</div>
+            <div class="line"><span class="prompt">$</span> ti list --search "description:migration"</div>
+          </div>
+        </div>
+
+        <h3>Sort</h3>
+        <div class="terminal">
+          <div class="term-header"><span>SORT ORDER</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --order title</div>
+            <div class="line"><span class="prompt">$</span> ti list --order created.desc</div>
+            <div class="line"><span class="prompt">$</span> ti list --order state</div>
+            <div class="line"><span class="prompt">$</span> ti list --order assigned.desc</div>
+          </div>
+        </div>
+
+        <h3>Combine filters</h3>
+        <div class="terminal">
+          <div class="term-header"><span>COMBINED</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list --tag bug --state in-progress --order created.desc</div>
+          </div>
+        </div>
+
+        <h2>Showing a ticket</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>TI SHOW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show 3d3a5d</div>
+            <div class="line dim">-----------------------------------------------------------</div>
+            <div class="line dim">Title&nbsp;&nbsp;&nbsp;: Add spec field to tickets for implementation specifications</div>
+            <div class="line dim">Id&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: 3d3a5d72-109d-47fa-a91d-0c7ff5d00b4a</div>
+            <div class="line dim">Created : 2026-05-09 (0d)  by schacon@gmail.com</div>
+            <div class="line dim">Status&nbsp;&nbsp;: open</div>
+            <div class="line dim">State&nbsp;&nbsp;&nbsp;: new</div>
+            <div class="line dim">Tags&nbsp;&nbsp;&nbsp;&nbsp;: feature</div>
+            <div class="line dim">Description:</div>
+            <div class="line dim">&nbsp;&nbsp;none</div>
+            <div class="line dim">-----------------------------------------------------------</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="ref">schacon@gmail.com</span> <span class="dim">- 2026-05-09T10:46:38.649Z</span></div>
+            <div class="line dim">&nbsp;&nbsp;Add a top-level 'spec' field (like title and description)</div>
+            <div class="line dim">&nbsp;&nbsp;that holds the implementation specification for a ticket.</div>
+          </div>
+        </div>
+
+        <p>If you have a ticket checked out, just <code>ti show</code> with no argument.</p>
+
+        <h2>Recent tickets</h2>
+        <div class="terminal">
+          <div class="term-header"><span>RECENT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti recent</div>
+            <div class="line"><span class="prompt">$</span> ti recent -n 5</div>
+          </div>
+        </div>
+
+        <h2>Interactive browser</h2>
+        <div class="terminal">
+          <div class="term-header"><span>TUI</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti tui</div>
+          </div>
+        </div>
+        <p>Launches a full-screen terminal UI for browsing and navigating tickets with keyboard controls.</p>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span>ticgit.dev / docs &middot; <a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
