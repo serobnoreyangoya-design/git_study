@@ -10,9 +10,68 @@ use crate::commands;
     version,
     disable_version_flag = true,
     about = "Tickets in your Git repo, stored as git-meta metadata",
-    long_about = "ti - a Git-native ticket tracker. Tickets, comments, tags, and \
-                  assignments are stored as git-meta metadata on the project target \
-                  and travel with the repo via sync."
+    subcommand_help_heading = "",
+    hide_possible_values = true,
+    help_template = "\
+{about}
+
+{usage-heading} {usage}
+
+Create & Browse:
+  new        Create a new ticket
+  list, ls   List tickets, with optional filters
+  show       Show one ticket and its comments
+  recent     Show the most recently touched tickets
+  tui        Browse open tickets in an interactive terminal UI
+
+Work on Tickets:
+  checkout, co  Select a ticket as \"current\"
+  edit          Edit a ticket's title and description
+  comment       Add a comment to a ticket
+  state         Change a ticket's lifecycle status/state
+  close         Close a ticket (shorthand for state resolved)
+
+Ticket Fields:
+  tag        Add or remove a tag
+  assign     Set or clear assigned user
+  points     Set or clear points (estimate)
+  milestone  Set or clear milestone
+  meta       Set a custom metadata field
+
+Views & Import:
+  save-view  Save a filtered list as a named view
+  views      Show a saved view
+  import     Import tickets from external systems (e.g. GitHub)
+
+Sync & Setup:
+  sync       Sync ticket metadata with a Git remote
+  init       Initialise ticgit on the current repo
+  setup      Configure git-meta remote from .git-meta
+  update     Update ti to the latest release
+
+Agents:
+  ti help --agent          Markdown guide for AI agents
+  ti list --json           Machine-readable ticket list
+  ti show <id> --json      Machine-readable ticket detail
+  ti show <id> --markdown  Ticket detail with next-step suggestions
+
+Examples:
+  ti new --title \"fix the parser\" --tags bug
+  ti list --tag bug --status open
+  ti show a3f
+  ti checkout a3f && ti comment \"on it\"
+  ti state resolved --ticket a3f
+  ti sync
+
+Agent Examples:
+  ti help --agent
+  ti list --json | jq '.[].title'
+  ti show a3f --markdown
+  ti new --title \"fix bug\" --json
+  ti comment --ticket a3f \"done\" --json
+
+Options:
+{options}"
 )]
 pub struct Cli {
     /// Print version.
@@ -25,13 +84,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Initialise ticgit metadata on the current repo (idempotent).
-    Init,
-
-    /// Configure git-meta remote from `.git-meta` file (idempotent).
-    Setup,
+    // -- Create & browse --------------------------------------------------
 
     /// Create a new ticket.
+    #[command(next_help_heading = "Create & Browse")]
     New(commands::new::Args),
 
     /// List tickets, with optional filters.
@@ -41,33 +97,38 @@ pub enum Command {
     /// Show one ticket and its comments.
     Show(commands::show::Args),
 
-    /// Select a ticket as "current" for subsequent commands.
-    #[command(visible_alias = "co")]
-    Checkout(commands::checkout::Args),
-
-    /// Close a ticket by marking it resolved.
-    Close(commands::close::Args),
-
-    /// Edit a ticket's title and description in your editor.
-    Edit(commands::edit::Args),
-
-    /// Import tickets from external systems.
-    Import(commands::import::Args),
-
     /// Show the most recently touched tickets.
     Recent(commands::recent::Args),
 
     /// Browse open tickets in an interactive terminal UI.
     Tui(commands::tui::Args),
 
-    /// Add or remove a tag on a ticket.
-    Tag(commands::tag::Args),
+    // -- Work on tickets --------------------------------------------------
+
+    /// Select a ticket as "current" for subsequent commands.
+    #[command(visible_alias = "co", next_help_heading = "Work on Tickets")]
+    Checkout(commands::checkout::Args),
+
+    /// Edit a ticket's title and description in your editor.
+    Edit(commands::edit::Args),
+
+    /// Add a comment to a ticket.
+    Comment(commands::comment::Args),
 
     /// Change a ticket's lifecycle status/state.
     State(commands::state::Args),
 
     /// Alias for `state`.
     Status(commands::state::Args),
+
+    /// Close a ticket by marking it resolved.
+    Close(commands::close::Args),
+
+    // -- Ticket fields ----------------------------------------------------
+
+    /// Add or remove a tag on a ticket.
+    #[command(next_help_heading = "Ticket Fields")]
+    Tag(commands::tag::Args),
 
     /// Set or clear a ticket's assigned user.
     Assign(commands::assign::Args),
@@ -81,17 +142,29 @@ pub enum Command {
     /// Set a string metadata field on a ticket.
     Meta(commands::meta::Args),
 
-    /// Add a comment to a ticket.
-    Comment(commands::comment::Args),
+    // -- Views & import ---------------------------------------------------
 
     /// Save the result of `ti list` (with filters) as a named view.
+    #[command(next_help_heading = "Views & Import")]
     SaveView(commands::view::SaveArgs),
 
     /// Show a saved view.
     Views(commands::view::ListArgs),
 
+    /// Import tickets from external systems.
+    Import(commands::import::Args),
+
+    // -- Sync & setup -----------------------------------------------------
+
     /// Sync ticket metadata with a Git remote (pull then push).
+    #[command(next_help_heading = "Sync & Setup")]
     Sync(commands::sync::Args),
+
+    /// Initialise ticgit metadata on the current repo (idempotent).
+    Init,
+
+    /// Configure git-meta remote from `.git-meta` file (idempotent).
+    Setup,
 
     /// Update ti to the latest release.
     Update(commands::update::Args),
