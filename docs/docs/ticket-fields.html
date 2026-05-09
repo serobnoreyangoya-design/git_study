@@ -113,18 +113,76 @@
         </div>
 
         <h2>Spec</h2>
-        <p>The spec field holds implementation specifications -- the "how", separate from the description's "what/why". Set it via <code>ti edit</code> or programmatically.</p>
-        <p>When a spec is set, <code>ti show</code> displays its first line:</p>
+        <p>The spec field holds implementation specifications -- the "how", separate from the description's "what/why". It's a top-level ticket field like title and description.</p>
+
+        <h3>Viewing the spec</h3>
+        <p>When a spec is set, <code>ti show</code> displays its first line in the ticket header:</p>
 
         <div class="terminal dark">
-          <div class="term-header"><span>SPEC IN SHOW</span></div>
+          <div class="term-header"><span>SPEC IN TI SHOW</span></div>
           <div class="term-body">
             <div class="line"><span class="prompt">$</span> ti show a3f</div>
             <div class="line dim">-----------------------------------------------------------</div>
             <div class="line dim">Title&nbsp;&nbsp;&nbsp;: Refactor auth middleware</div>
-            <div class="line dim">...</div>
+            <div class="line dim">Id&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: a3f29c84-d6ec-3da1-a180-0a33fb090d59</div>
+            <div class="line dim">Created : 2026-05-09 (0d)  by alice@example.com</div>
+            <div class="line dim">Status&nbsp;&nbsp;: open</div>
+            <div class="line dim">State&nbsp;&nbsp;&nbsp;: in-progress</div>
             <div class="line dim">Spec&nbsp;&nbsp;&nbsp;&nbsp;: Use RS256 tokens with 24h expiry, rotate via cron</div>
+            <div class="line dim">Tags&nbsp;&nbsp;&nbsp;&nbsp;: security, refactor</div>
             <div class="line dim">...</div>
+          </div>
+        </div>
+
+        <p>To read the full spec (which may be multiline), use <code>--filter</code> or <code>--json</code>:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>READ FULL SPEC</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show a3f --filter .spec</div>
+            <div class="line dim">Use RS256 tokens with 24h expiry, rotate via cron.</div>
+            <div class="line dim">Migrate existing HS256 sessions in a background job.</div>
+            <div class="line dim">Add a feature flag for gradual rollout.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti show a3f --json | jq -r '.spec'</div>
+            <div class="line dim">Use RS256 tokens with 24h expiry, rotate via cron.</div>
+            <div class="line dim">Migrate existing HS256 sessions in a background job.</div>
+            <div class="line dim">Add a feature flag for gradual rollout.</div>
+          </div>
+        </div>
+
+        <h3>Setting the spec</h3>
+        <p>Use <code>ti spec</code> to set the spec inline, from a file, or via your editor:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SET SPEC INLINE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti spec "Use RS256 tokens with 24h expiry"</div>
+            <div class="line dim">a3f29c spec: Use RS256 tokens with 24h expiry</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti spec --ticket a3f "Use RS256 tokens with 24h expiry"</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SET SPEC FROM FILE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti spec --file spec.md</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>EDIT SPEC IN $EDITOR</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti spec</div>
+            <div class="line dim">Opens $EDITOR with the current spec for editing.</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>CLEAR SPEC</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti spec --clear</div>
           </div>
         </div>
 

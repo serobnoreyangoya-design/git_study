@@ -16,6 +16,7 @@ pub mod points;
 pub mod recent;
 pub mod setup;
 pub mod show;
+pub mod spec;
 pub mod state;
 pub mod sync;
 pub mod tag;

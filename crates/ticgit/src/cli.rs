@@ -139,6 +139,9 @@ pub enum Command {
     /// Set or clear a ticket's milestone.
     Milestone(commands::milestone::Args),
 
+    /// Set or clear a ticket's implementation spec.
+    Spec(commands::spec::Args),
+
     /// Set a string metadata field on a ticket.
     Meta(commands::meta::Args),
 
@@ -190,6 +193,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Assign(args)) => commands::assign::run(args),
         Some(Command::Points(args)) => commands::points::run(args),
         Some(Command::Milestone(args)) => commands::milestone::run(args),
+        Some(Command::Spec(args)) => commands::spec::run(args),
         Some(Command::Meta(args)) => commands::meta::run(args),
         Some(Command::Comment(args)) => commands::comment::run(args),
         Some(Command::SaveView(args)) => commands::view::run_save(args),
