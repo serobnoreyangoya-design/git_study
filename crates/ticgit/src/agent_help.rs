@@ -241,13 +241,73 @@ Ticket metadata is separate from normal Git commits. Sync it explicitly when col
 ti sync
 ```
 
+## Planning With Specs
+
+Use the `spec` field to write an implementation plan before starting work. The spec is a top-level ticket field separate from the description — the description says *what/why*, the spec says *how*.
+
+```sh
+# Write a spec inline
+ti spec -t <id> "Use RS256 tokens with 24h expiry, rotate via cron"
+
+# Write a spec from a file (good for multi-line plans)
+ti spec -t <id> -F /tmp/plan.md
+
+# Open $EDITOR for the spec
+ti spec -t <id>
+
+# Read the spec
+ti show <id> --filter .spec
+
+# Clear the spec
+ti spec -t <id> --clear
+```
+
+When picking up a ticket, check if a spec exists. If not, write one before coding. A good spec covers: approach, files to change, edge cases, and how to verify.
+
+## Pick Next Work
+
+Use `ti next` to automatically select and check out the highest-priority open ticket:
+
+```sh
+ti next
+ti next --tag bug
+ti next --assigned alice@example.com
+ti next --markdown
+```
+
+`ti next` scores tickets by state (in-progress > assigned > new), assignment, points, and age. It skips sub-issues and tickets with unresolved dependencies.
+
+## Dependencies
+
+Mark tickets that must be completed before another can start:
+
+```sh
+ti depends <blocker-id> -t <id>      # <id> depends on <blocker-id>
+ti depends <blocker-id> -t <id> --remove
+ti depends --clear -t <id>
+```
+
+Dependencies show as `Depends:` and `Blocks:` in `ti show`. Circular dependencies are rejected. `ti next` will not pick tickets with open dependencies.
+
+## Code URIs
+
+Link a ticket to the branch where work is happening:
+
+```sh
+ti code https://github.com/owner/repo:feature-branch -t <id>
+ti code --clear -t <id>
+```
+
 ## Agent Practices
 
 - Prefer `--markdown` for commands that support it; use `--json` only when a script needs stable schema output.
 - Use ticket ids or unique prefixes; ambiguous prefixes fail.
 - Run `ti checkout <id>` before multi-step work so later commands can omit `-t <id>`.
+- Before starting work, read the spec (`ti show <id> --filter .spec`). If none exists, write one with `ti spec`.
 - Add comments for meaningful observations, plans, blockers, and results.
 - Keep tags short and queryable, such as `bug`, `feature`, `docs`, `parser`, or `agent`.
+- Use `ti next` to pick work rather than scanning the full list.
+- Set dependencies with `ti depends` when tickets have ordering constraints.
 - Resolve tickets only after code changes and relevant verification are complete.
 "#;
 
