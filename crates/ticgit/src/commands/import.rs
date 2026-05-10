@@ -13,6 +13,10 @@ const GH_ISSUE_FIELDS: &str = "number,title,body,url,author,labels,assignees,mil
 const GITHUB_TAG: &str = "github";
 const GITHUB_ISSUE_TAG_PREFIX: &str = "github-issue-";
 
+const LINEAR_TAG: &str = "linear";
+const LINEAR_ISSUE_TAG_PREFIX: &str = "linear-";
+const LINEAR_API_URL: &str = "https://api.linear.app/graphql";
+
 #[derive(Debug, Parser)]
 pub struct Args {
     #[command(subcommand)]
@@ -24,6 +28,9 @@ pub enum Source {
     /// Import open issues using the GitHub CLI (`gh`).
     #[command(name = "gh")]
     Gh(GhArgs),
+
+    /// Import issues from Linear via the Linear GraphQL API.
+    Linear(LinearArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -45,9 +52,29 @@ pub struct GhArgs {
     pub markdown: bool,
 }
 
+#[derive(Debug, Parser)]
+pub struct LinearArgs {
+    /// Linear team key (e.g. "ENG").
+    #[arg(short = 't', long = "team")]
+    pub team: String,
+
+    /// Maximum number of issues to import.
+    #[arg(long = "limit", default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
+    pub limit: u32,
+
+    /// Output an import summary and imported tickets as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Output an import summary and imported tickets as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
+}
+
 pub fn run(args: Args) -> Result<()> {
     match args.source {
         Source::Gh(args) => run_gh(args),
+        Source::Linear(args) => run_linear(args),
     }
 }
 
@@ -212,6 +239,276 @@ fn issue_description(issue: &GhIssue) -> String {
     description
 }
 
+// ── Linear import ──────────────────────────────────────────────────
+
+fn run_linear(args: LinearArgs) -> Result<()> {
+    let api_key = std::env::var("LINEAR_API_KEY").map_err(|_| {
+        anyhow::anyhow!(
+            "LINEAR_API_KEY environment variable not set.\n\
+             Create a personal API key at https://linear.app/settings/api\n\
+             then export LINEAR_API_KEY=lin_api_..."
+        )
+    })?;
+
+    let store = open_store()?;
+    let issues = fetch_linear_issues(&api_key, &args.team, args.limit)?;
+    let seen = existing_linear_identifiers(&store)?;
+
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let mut imported_tickets = Vec::new();
+
+    for issue in issues {
+        if seen.contains(&issue.identifier) {
+            skipped += 1;
+            continue;
+        }
+
+        let opts = NewTicketOpts {
+            comment: None,
+            tags: linear_issue_tags(&issue),
+            assigned: linear_assignee(&issue),
+            parent: None,
+        };
+        let ticket = store.create(&issue.title, opts)?;
+        store.set_description(&ticket.id, Some(&linear_description(&issue)))?;
+
+        if let Some(project) = issue.project.as_ref().and_then(|p| non_empty(&p.name)) {
+            store.set_milestone(&ticket.id, Some(project))?;
+        }
+
+        if let Some(priority) = issue.priority {
+            if priority > 0 {
+                store.set_points(&ticket.id, Some(priority as i64))?;
+            }
+        }
+
+        imported_tickets.push(store.load(&ticket.id)?);
+        imported += 1;
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "imported": imported,
+                "skipped": skipped,
+                "tickets": imported_tickets,
+            })
+        );
+        return Ok(());
+    }
+    if args.markdown {
+        println!(
+            "{}",
+            render::import_markdown(imported, skipped, &imported_tickets)
+        );
+        return Ok(());
+    }
+
+    println!("Imported {imported} Linear issue(s).");
+    if skipped > 0 {
+        println!("Skipped {skipped} issue(s) that were already imported.");
+    }
+
+    Ok(())
+}
+
+const LINEAR_QUERY: &str = r#"
+query($teamKey: String!, $first: Int!, $after: String) {
+  issues(
+    filter: {
+      team: { key: { eq: $teamKey } }
+      state: { type: { nin: ["completed", "canceled"] } }
+    }
+    first: $first
+    after: $after
+    orderBy: createdAt
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      url
+      priority
+      state { name }
+      assignee { email name }
+      labels { nodes { name } }
+      project { name }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
+
+fn fetch_linear_issues(api_key: &str, team: &str, limit: u32) -> Result<Vec<LinearIssue>> {
+    let mut all_issues = Vec::new();
+    let mut cursor: Option<String> = None;
+    let page_size = limit.min(100);
+
+    loop {
+        let variables = serde_json::json!({
+            "teamKey": team,
+            "first": page_size,
+            "after": cursor,
+        });
+        let body = serde_json::json!({
+            "query": LINEAR_QUERY,
+            "variables": variables,
+        });
+
+        let response: serde_json::Value = ureq::post(LINEAR_API_URL)
+            .header("Authorization", api_key)
+            .send_json(&body)
+            .context("calling Linear GraphQL API")?
+            .body_mut()
+            .read_json()
+            .context("parsing Linear API response")?;
+
+        if let Some(errors) = response.get("errors") {
+            let msg = errors
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("Linear API error: {msg}");
+        }
+
+        let issues_data = response
+            .get("data")
+            .and_then(|d| d.get("issues"))
+            .ok_or_else(|| anyhow::anyhow!("unexpected Linear API response structure"))?;
+
+        let nodes: Vec<LinearIssue> =
+            serde_json::from_value(issues_data.get("nodes").cloned().unwrap_or_default())
+                .context("parsing Linear issues")?;
+
+        all_issues.extend(nodes);
+
+        if all_issues.len() as u32 >= limit {
+            all_issues.truncate(limit as usize);
+            break;
+        }
+
+        let has_next = issues_data
+            .get("pageInfo")
+            .and_then(|p| p.get("hasNextPage"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !has_next {
+            break;
+        }
+
+        cursor = issues_data
+            .get("pageInfo")
+            .and_then(|p| p.get("endCursor"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+    }
+
+    Ok(all_issues)
+}
+
+fn existing_linear_identifiers(store: &TicketStore) -> Result<BTreeSet<String>> {
+    let mut identifiers = BTreeSet::new();
+    for ticket in store.list()? {
+        for tag in &ticket.tags {
+            if let Some(id) = tag.strip_prefix(LINEAR_ISSUE_TAG_PREFIX) {
+                identifiers.insert(id.to_string());
+            }
+        }
+    }
+    Ok(identifiers)
+}
+
+fn linear_issue_tags(issue: &LinearIssue) -> Vec<String> {
+    let mut tags = vec![
+        LINEAR_TAG.to_string(),
+        format!("{LINEAR_ISSUE_TAG_PREFIX}{}", issue.identifier),
+    ];
+    if let Some(labels) = &issue.labels {
+        tags.extend(
+            labels
+                .nodes
+                .iter()
+                .filter_map(|l| non_empty(&l.name).map(|s| s.to_lowercase())),
+        );
+    }
+    tags
+}
+
+fn linear_assignee(issue: &LinearIssue) -> Option<String> {
+    issue.assignee.as_ref().and_then(|a| {
+        non_empty(&a.email)
+            .or_else(|| non_empty(&a.name))
+            .map(ToString::to_string)
+    })
+}
+
+fn linear_description(issue: &LinearIssue) -> String {
+    let mut desc = format!("Linear issue: {}", issue.url);
+
+    if let Some(state) = &issue.state {
+        if let Some(name) = non_empty(&state.name) {
+            desc.push_str(&format!("\nLinear state: {name}"));
+        }
+    }
+
+    if let Some(body) = issue.description.as_deref().and_then(non_empty) {
+        desc.push_str("\n\n");
+        desc.push_str(body);
+    }
+
+    desc
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearIssue {
+    identifier: String,
+    title: String,
+    description: Option<String>,
+    url: String,
+    priority: Option<i32>,
+    state: Option<LinearState>,
+    assignee: Option<LinearAssignee>,
+    labels: Option<LinearLabels>,
+    project: Option<LinearProject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearState {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearAssignee {
+    email: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearLabels {
+    nodes: Vec<LinearLabel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearLabel {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinearProject {
+    name: String,
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────
+
 fn non_empty(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -299,5 +596,68 @@ mod tests {
             issue_description(&issue()),
             "GitHub issue: https://github.com/example/repo/issues/42\nGitHub author: monalisa\nGitHub assignees: octocat, hubot\n\nbody text"
         );
+    }
+
+    fn linear_issue() -> LinearIssue {
+        LinearIssue {
+            identifier: "ENG-123".to_string(),
+            title: "fix auth flow".to_string(),
+            description: Some("Users can't log in after token expiry".to_string()),
+            url: "https://linear.app/team/issue/ENG-123".to_string(),
+            priority: Some(2),
+            state: Some(LinearState {
+                name: "In Progress".to_string(),
+            }),
+            assignee: Some(LinearAssignee {
+                email: "alice@example.com".to_string(),
+                name: "Alice".to_string(),
+            }),
+            labels: Some(LinearLabels {
+                nodes: vec![LinearLabel {
+                    name: "Bug".to_string(),
+                }],
+            }),
+            project: Some(LinearProject {
+                name: "Auth Rewrite".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn linear_issue_tags_include_source_identifier_and_labels() {
+        assert_eq!(
+            linear_issue_tags(&linear_issue()),
+            vec![
+                "linear".to_string(),
+                "linear-ENG-123".to_string(),
+                "bug".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn linear_issue_description_includes_url_state_and_body() {
+        assert_eq!(
+            linear_description(&linear_issue()),
+            "Linear issue: https://linear.app/team/issue/ENG-123\nLinear state: In Progress\n\nUsers can't log in after token expiry"
+        );
+    }
+
+    #[test]
+    fn linear_assignee_prefers_email() {
+        assert_eq!(
+            linear_assignee(&linear_issue()),
+            Some("alice@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn linear_assignee_falls_back_to_name() {
+        let mut issue = linear_issue();
+        issue.assignee = Some(LinearAssignee {
+            email: String::new(),
+            name: "Bob".to_string(),
+        });
+        assert_eq!(linear_assignee(&issue), Some("Bob".to_string()));
     }
 }
