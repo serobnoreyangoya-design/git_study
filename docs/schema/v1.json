@@ -34,6 +34,8 @@
         "code",
         "parent",
         "children",
+        "depends_on",
+        "blocks",
         "tags",
         "meta",
         "comments",
@@ -120,6 +122,24 @@
             "format": "uuid"
           },
           "uniqueItems": true
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "uniqueItems": true,
+          "description": "Tickets this ticket depends on (must be resolved before this can proceed)"
+        },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "uniqueItems": true,
+          "description": "Tickets that depend on this ticket (denormalized reverse of depends_on)"
         },
         "tags": {
           "type": "array",

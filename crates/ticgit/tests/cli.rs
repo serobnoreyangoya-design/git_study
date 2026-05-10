@@ -158,6 +158,8 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
             "code".to_string(),
             "parent".to_string(),
             "children".to_string(),
+            "depends_on".to_string(),
+            "blocks".to_string(),
             "tags".to_string(),
             "meta".to_string(),
             "comments".to_string(),

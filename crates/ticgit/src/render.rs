@@ -203,6 +203,28 @@ pub fn ticket_detail(t: &Ticket) -> String {
             &ansi(ANSI_CYAN, &child_ids.join(", ")),
         ));
     }
+    if !t.depends_on.is_empty() {
+        let dep_ids: Vec<String> = t
+            .depends_on
+            .iter()
+            .map(|d| d.to_string().chars().take(6).collect())
+            .collect();
+        out.push_str(&detail_field(
+            "Depends",
+            &ansi(ANSI_CYAN, &dep_ids.join(", ")),
+        ));
+    }
+    if !t.blocks.is_empty() {
+        let block_ids: Vec<String> = t
+            .blocks
+            .iter()
+            .map(|b| b.to_string().chars().take(6).collect())
+            .collect();
+        out.push_str(&detail_field(
+            "Blocks",
+            &ansi(ANSI_CYAN, &block_ids.join(", ")),
+        ));
+    }
     if let Some(spec) = &t.spec {
         let first_line = spec.lines().next().unwrap_or("");
         out.push_str(&detail_field("Spec", &ansi(ANSI_DIM, first_line)));
@@ -814,6 +836,8 @@ mod tests {
             code: None,
             parent: None,
             children: BTreeSet::new(),
+            depends_on: BTreeSet::new(),
+            blocks: BTreeSet::new(),
             tags: BTreeSet::new(),
             meta: BTreeMap::new(),
             comments: Vec::new(),

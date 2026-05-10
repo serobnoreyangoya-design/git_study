@@ -5,6 +5,7 @@ pub mod assign;
 pub mod checkout;
 pub mod close;
 pub mod code;
+pub mod depends;
 pub mod comment;
 pub mod edit;
 pub mod import;

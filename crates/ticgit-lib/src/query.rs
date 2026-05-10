@@ -284,6 +284,8 @@ mod tests {
             code: None,
             parent: None,
             children: BTreeSet::new(),
+            depends_on: BTreeSet::new(),
+            blocks: BTreeSet::new(),
             tags,
             meta: BTreeMap::new(),
             comments: vec![],

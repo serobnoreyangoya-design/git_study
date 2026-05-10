@@ -377,6 +377,64 @@ impl TicketStore {
         Ok(())
     }
 
+    /// Add a dependency: `id` depends on `dependency_id`.
+    /// The dependency ticket must exist. Circular dependencies are rejected.
+    pub fn add_dependency(&self, id: &Uuid, dependency_id: &Uuid) -> Result<()> {
+        if id == dependency_id {
+            return Err(Error::InvalidValue(
+                "a ticket cannot depend on itself".to_string(),
+            ));
+        }
+        // Validate dependency exists
+        self.load(dependency_id)?;
+
+        // Check for circular deps: walk the dependency chain from dependency_id
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(*id);
+        let mut stack = vec![*dependency_id];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            let t = self.load(&current)?;
+            for dep in &t.depends_on {
+                if dep == id {
+                    return Err(Error::InvalidValue(
+                        "circular dependency detected".to_string(),
+                    ));
+                }
+                stack.push(*dep);
+            }
+        }
+
+        let p = self.project_handle();
+        // id depends_on dependency_id
+        p.set_add(
+            &keys::ticket_field(id, "depends_on"),
+            &dependency_id.to_string(),
+        )?;
+        // dependency_id blocks id (denormalized reverse)
+        p.set_add(
+            &keys::ticket_field(dependency_id, "blocks"),
+            &id.to_string(),
+        )?;
+        Ok(())
+    }
+
+    /// Remove a dependency: `id` no longer depends on `dependency_id`.
+    pub fn remove_dependency(&self, id: &Uuid, dependency_id: &Uuid) -> Result<()> {
+        let p = self.project_handle();
+        p.set_remove(
+            &keys::ticket_field(id, "depends_on"),
+            &dependency_id.to_string(),
+        )?;
+        p.set_remove(
+            &keys::ticket_field(dependency_id, "blocks"),
+            &id.to_string(),
+        )?;
+        Ok(())
+    }
+
     pub fn set_meta(&self, id: &Uuid, field: &str, value: &str) -> Result<()> {
         let field = field.trim();
         if field.is_empty() {
@@ -559,6 +617,8 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
     let mut code: Option<String> = None;
     let mut parent: Option<Uuid> = None;
     let mut children: BTreeSet<Uuid> = BTreeSet::new();
+    let mut depends_on: BTreeSet<Uuid> = BTreeSet::new();
+    let mut blocks: BTreeSet<Uuid> = BTreeSet::new();
     let mut tags: BTreeSet<String> = BTreeSet::new();
     let mut meta: BTreeMap<String, String> = BTreeMap::new();
     let mut comments: Vec<Comment> = Vec::new();
@@ -602,6 +662,12 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
             ("children", MetaValue::Set(members)) => {
                 children = members.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect();
             }
+            ("depends_on", MetaValue::Set(members)) => {
+                depends_on = members.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect();
+            }
+            ("blocks", MetaValue::Set(members)) => {
+                blocks = members.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect();
+            }
             ("tags", MetaValue::Set(members)) => tags = members,
             ("comments", MetaValue::List(entries)) => comments = decode_comments(entries),
             (field, MetaValue::String(s)) if field.starts_with("meta:") => {
@@ -639,6 +705,8 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         code,
         parent,
         children,
+        depends_on,
+        blocks,
         tags,
         meta,
         comments,

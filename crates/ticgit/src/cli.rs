@@ -39,6 +39,7 @@ Ticket Fields:
   milestone  Set or clear milestone
   subissue   Make a ticket a sub-issue of another
   code       Set or clear a code URI (repo + branch)
+  depends    Add or remove a dependency between tickets
   meta       Set a custom metadata field
 
 Views & Import:
@@ -153,6 +154,9 @@ pub enum Command {
     /// Set or clear a code URI (https://host/path:branch) for associated code.
     Code(commands::code::Args),
 
+    /// Add or remove a dependency between tickets.
+    Depends(commands::depends::Args),
+
     /// Set or clear a ticket's implementation spec.
     Spec(commands::spec::Args),
 
@@ -217,6 +221,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Milestone(args)) => commands::milestone::run(args),
         Some(Command::Subissue(args)) => commands::subissue::run(args),
         Some(Command::Code(args)) => commands::code::run(args),
+        Some(Command::Depends(args)) => commands::depends::run(args),
         Some(Command::Spec(args)) => commands::spec::run(args),
         Some(Command::Meta(args)) => commands::meta::run(args),
         Some(Command::Comment(args)) => commands::comment::run(args),

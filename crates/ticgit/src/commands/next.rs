@@ -28,12 +28,21 @@ pub struct Args {
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
     let git_dir = store.session().repo_git_dir();
-    let tickets = store.list()?;
+    let all_tickets = store.list()?;
 
-    let mut candidates: Vec<Ticket> = tickets
+    // Build a set of closed ticket IDs for dependency checking
+    let closed_ids: std::collections::HashSet<uuid::Uuid> = all_tickets
+        .iter()
+        .filter(|t| t.status == TicketStatus::Closed)
+        .map(|t| t.id)
+        .collect();
+
+    let mut candidates: Vec<Ticket> = all_tickets
         .into_iter()
         .filter(|t| t.status == TicketStatus::Open)
         .filter(|t| t.parent.is_none())
+        // Skip tickets whose dependencies are not all resolved
+        .filter(|t| t.depends_on.iter().all(|dep| closed_ids.contains(dep)))
         .filter(|t| {
             if let Some(tag) = &args.tag {
                 t.tags.contains(tag)
