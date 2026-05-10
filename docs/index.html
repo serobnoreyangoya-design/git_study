@@ -513,27 +513,25 @@
           <div class="card-body">
             <div class="line">
               <span class="prompt">$</span
-              ><span class="cmd">ti new "fix oauth redirect"</span>
+              ><span class="cmd">ti new --title "fix oauth redirect" --tags bug</span>
             </div>
-            <div class="indent ok">
-              ✓ created <span class="id">#a3f2</span> · open
+            <div class="indent dim">
+              Created ticket <span class="id">a3f29c</span> (fix oauth redirect)
             </div>
             <div class="line">
               <span class="prompt">$</span><span class="cmd">ti list</span>
             </div>
-            <div class="row indent">
-              <span><span class="id">#a3f2</span> open</span
-              ><span>fix oauth redirect</span><span class="age">2m</span>
+            <div class="indent dim" style="font-size:0.9em">
+              <span class="id">a3f29c</span> 0d  fix oauth redirect&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open  new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug
             </div>
-            <div class="row indent">
-              <span><span class="id">#b81e</span> open</span
-              ><span>onboarding copy</span><span class="age">1h</span>
+            <div class="indent dim" style="font-size:0.9em">
+              <span class="id">b81e04</span> 1d  update onboarding copy&nbsp;&nbsp;open  assigned&nbsp;&nbsp;docs
             </div>
             <div class="line">
               <span class="prompt">$</span
-              ><span class="cmd">ti close a3f2</span>
+              ><span class="cmd">ti close a3f</span>
             </div>
-            <div class="indent ok">✓ closed</div>
+            <div class="indent dim">Closed a3f29c.</div>
           </div>
         </article>
 
@@ -563,18 +561,12 @@
             <div class="line">
               <span class="prompt">$</span><span class="cmd">ti sync</span>
             </div>
-            <div class="indent">
-              ↳ pulling <span class="ref">refs/meta/*</span>
-            </div>
-            <div class="indent">
-              ↳ pushing <span class="ref">refs/meta/*</span>
-            </div>
-            <div class="indent ok">✓ team issue state current</div>
-            <div class="line">
-              <span class="prompt">$</span
-              ><span class="cmd">ti list --status open</span>
-            </div>
-            <div class="indent dim">2 open · sorted by updated</div>
+            <div class="indent dim">Remote: origin</div>
+            <div class="indent dim">Ref: <span class="ref">refs/meta/main</span></div>
+            <div class="indent dim">URL: git@github.com:team/project.git</div>
+            <div class="indent dim">Pull: 3 new ticket(s)</div>
+            <div class="indent dim">Push: 12 ticket(s) synced.</div>
+            <div class="indent ok">Done.</div>
           </div>
         </article>
       </section>
