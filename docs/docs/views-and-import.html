@@ -35,7 +35,7 @@
         </header>
 
         <h1>Views and Import</h1>
-        <p>Commands: <code>ti save-view</code>, <code>ti views</code>, <code>ti import</code></p>
+        <p>Commands: <code>ti save-view</code>, <code>ti views</code>, <code>ti stats</code>, <code>ti import</code></p>
 
         <h2>Saved views</h2>
         <p>Views are named collections of tickets based on filter criteria. They let you save a query you run often.</p>
@@ -87,6 +87,42 @@
             <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;2d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fix parser panic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;in-progress&nbsp;bug</div>
             <div class="line dim">&nbsp;&nbsp;d91c3a&nbsp;5d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;null pointer in export&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
             <div class="line dim">&nbsp;&nbsp;7b2e4f&nbsp;8d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;crash on large input&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;assigned&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+          </div>
+        </div>
+
+        <h2>Stats dashboard</h2>
+        <p>Get an overview of your project's tickets with <code>ti stats</code>:</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>STATS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti stats</div>
+            <div class="line dim">────────────────────────────────────────────────</div>
+            <div class="line dim">&nbsp;&nbsp;TICGIT STATS</div>
+            <div class="line dim">────────────────────────────────────────────────</div>
+            <div class="line dim">&nbsp;</div>
+            <div class="line dim">&nbsp;&nbsp;Overview&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;27 ticket(s), 8 with comments</div>
+            <div class="line dim">&nbsp;&nbsp;Open&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;22&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Closed&nbsp;&nbsp;5</div>
+            <div class="line dim">&nbsp;</div>
+            <div class="line dim">&nbsp;&nbsp;States</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;14&nbsp;&nbsp;████████████████████</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;in-progress&nbsp;&nbsp;&nbsp;6&nbsp;&nbsp;████████</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;resolved&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;5&nbsp;&nbsp;███████</div>
+            <div class="line dim">&nbsp;</div>
+            <div class="line dim">&nbsp;&nbsp;Top Tags</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;feature&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;12&nbsp;&nbsp;████████████████████</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;bug&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;8&nbsp;&nbsp;█████████████</div>
+            <div class="line dim">&nbsp;&nbsp;&nbsp;&nbsp;agent&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;4&nbsp;&nbsp;██████</div>
+            <div class="line dim">&nbsp;</div>
+            <div class="line dim">────────────────────────────────────────────────</div>
+          </div>
+        </div>
+
+        <p>Machine-readable output:</p>
+        <div class="terminal">
+          <div class="term-header"><span>JSON</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti stats --json</div>
           </div>
         </div>
 

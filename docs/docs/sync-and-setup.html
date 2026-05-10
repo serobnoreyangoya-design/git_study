@@ -35,7 +35,7 @@
         </header>
 
         <h1>Sync and Setup</h1>
-        <p>Commands: <code>ti sync</code>, <code>ti init</code>, <code>ti setup</code>, <code>ti update</code></p>
+        <p>Commands: <code>ti sync</code>, <code>ti pull</code>, <code>ti init</code>, <code>ti setup</code>, <code>ti update</code></p>
 
         <h2>How TicGit stores data</h2>
         <p>TicGit stores tickets as <a href="https://git-meta.com">git-meta</a> metadata, which lives in a separate Git ref (<code>refs/meta/main</code>). This means:</p>
@@ -118,6 +118,38 @@
           </div>
         </div>
         <p>By default, <code>ti sync</code> uses the first remote with <code>remote.&lt;name&gt;.meta = true</code> in your git config, falling back to <code>origin</code>.</p>
+
+        <h2>ti pull</h2>
+        <p>Pull tickets from a fork or any remote URL. Unlike <code>ti sync</code>, this is a one-way import -- it fetches tickets from another repo and merges them into yours.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>PULL FROM URL</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti pull https://github.com/contributor/ticgit.git</div>
+            <div class="line dim">Fetching tickets from https://github.com/contributor/ticgit.git...</div>
+            <div class="line dim">Found 5 remote ticket(s).</div>
+            <div class="line dim">&nbsp;&nbsp;+ imported 2 new ticket(s)</div>
+            <div class="line dim">&nbsp;&nbsp;~ merged 1 modified ticket(s)</div>
+            <div class="line dim">&nbsp;&nbsp;= 2 unchanged</div>
+          </div>
+        </div>
+
+        <h3>Save a nickname</h3>
+        <p>Add a nickname so you don't have to type the full URL each time. The nickname is saved in <code>.git/config</code>.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>PULL WITH NICKNAME</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti pull https://github.com/contributor/ticgit.git alice</div>
+            <div class="line dim">Saved nickname "alice" for https://github.com/contributor/ticgit.git</div>
+            <div class="line dim">Fetching tickets...</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti pull alice</div>
+            <div class="line dim">Fetching tickets from https://github.com/contributor/ticgit.git...</div>
+          </div>
+        </div>
+
+        <p>Merge rules: new tickets are imported as-is. For modified tickets, scalar fields (title, description, status) use the remote's value, set fields (tags, comments) are merged by union, and comments are deduplicated by author and body.</p>
 
         <h2>ti update</h2>
         <div class="terminal">

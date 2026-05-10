@@ -35,7 +35,7 @@
         </header>
 
         <h1>Ticket Fields</h1>
-        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti meta</code>, <code>ti edit</code></p>
+        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti code</code>, <code>ti meta</code>, <code>ti edit</code></p>
         <p>Every ticket has a set of built-in fields. These commands let you set them without opening an editor.</p>
 
         <h2>Tags</h2>
@@ -236,6 +236,28 @@
           </div>
         </div>
 
+        <h2>Code</h2>
+        <p>Link a ticket to a specific branch in a Git repository using <code>ti code</code>. The URI format is <code>https://&lt;host&gt;/&lt;path&gt;:&lt;branch&gt;</code>.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>SET CODE URI</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti code https://github.com/schacon/ticgit:sc-fix-parser</div>
+            <div class="line dim">a3f29c code: https://github.com/schacon/ticgit:sc-fix-parser</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti code --ticket a3f https://github.com/schacon/ticgit:feature-branch</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>CLEAR CODE URI</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti code --clear</div>
+          </div>
+        </div>
+
+        <p>The URI is validated on set: it must start with <code>http://</code> or <code>https://</code>, include a host and path, and end with <code>:branch-name</code>.</p>
+
         <h2>Custom metadata</h2>
         <p>For anything that doesn't fit the built-in fields, use <code>ti meta</code> to set arbitrary key-value pairs:</p>
 
@@ -276,6 +298,7 @@
             <div class="line">&nbsp;&nbsp;"assigned": "alice@example.com",</div>
             <div class="line">&nbsp;&nbsp;"points": 5,</div>
             <div class="line">&nbsp;&nbsp;"milestone": "v2.0",</div>
+            <div class="line">&nbsp;&nbsp;"code": "https://github.com/owner/repo:fix-branch",</div>
             <div class="line">&nbsp;&nbsp;"tags": ["bug", "urgent"],</div>
             <div class="line">&nbsp;&nbsp;"parent": "7b2e4f91-...",</div>
             <div class="line">&nbsp;&nbsp;"children": ["c4d81b23-...", "e9f2a1d7-..."],</div>
