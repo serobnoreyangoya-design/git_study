@@ -44,6 +44,10 @@ pub struct Args {
     #[arg(short = 'V', long = "view")]
     pub view: Option<String>,
 
+    /// Include sub-issues (hidden by default).
+    #[arg(long = "subissues")]
+    pub subissues: bool,
+
     /// Maximum number of tickets to show.
     #[arg(short = 'n', long = "limit", default_value_t = 20)]
     pub limit: usize,
@@ -99,6 +103,7 @@ pub fn run(args: Args) -> Result<()> {
         only_tagged: args.only_tagged,
         search,
         order,
+        hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
     if !args.all && args.limit > 0 {

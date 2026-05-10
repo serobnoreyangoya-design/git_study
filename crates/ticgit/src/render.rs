@@ -121,7 +121,14 @@ fn tickets_table_with_width(
             &fit(&relative_date(t.created_at, now), DATE_WIDTH),
         ));
         out.push_str("  ");
-        out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), title_width)));
+        if t.children.is_empty() {
+            out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), title_width)));
+        } else {
+            let suffix = format!(" [+{}]", t.children.len());
+            let avail = title_width.saturating_sub(suffix.len());
+            out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), avail)));
+            out.push_str(&ansi(ANSI_DIM, &fit(&suffix, suffix.len())));
+        }
         out.push(' ');
         out.push_str(&ansi(
             status_color(t.status.as_str()),

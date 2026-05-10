@@ -18,6 +18,8 @@ pub struct Filter {
     pub only_tagged: bool,
     pub search: Option<SearchFilter>,
     pub order: Option<SortOrder>,
+    /// When true, exclude tickets that have a parent (i.e. sub-issues).
+    pub hide_subissues: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +177,9 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
                 if !search.matches(t) {
                     return false;
                 }
+            }
+            if filter.hide_subissues && t.parent.is_some() {
+                return false;
             }
             true
         })
