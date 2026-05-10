@@ -35,7 +35,7 @@
         </header>
 
         <h1>Ticket Fields</h1>
-        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti code</code>, <code>ti meta</code>, <code>ti edit</code></p>
+        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti priority</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti code</code>, <code>ti meta</code>, <code>ti edit</code></p>
         <p>Every ticket has a set of built-in fields. These commands let you set them without opening an editor.</p>
 
         <h2>Tags</h2>
@@ -87,6 +87,20 @@
             <div class="line"><span class="prompt">$</span> ti list --assigned alice@example.com</div>
           </div>
         </div>
+
+        <h2>Priority</h2>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>PRIORITY</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti priority 3</div>
+            <div class="line"><span class="prompt">$</span> ti priority --ticket a3f 5</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti priority --clear</div>
+          </div>
+        </div>
+
+        <p>Lower values mean more important (e.g. 1 is highest priority). Priority is the dominant factor in <code>ti next</code> scoring.</p>
 
         <h2>Points</h2>
 

@@ -35,6 +35,7 @@ Work on Tickets:
 Ticket Fields:
   tag        Add or remove a tag
   assign     Set or clear assigned user
+  priority   Set or clear priority (lower = more important)
   points     Set or clear points (estimate)
   milestone  Set or clear milestone
   subissue   Make a ticket a sub-issue of another
@@ -142,6 +143,9 @@ pub enum Command {
     /// Set or clear a ticket's assigned user.
     Assign(commands::assign::Args),
 
+    /// Set or clear a ticket's priority (lower = more important).
+    Priority(commands::priority::Args),
+
     /// Set or clear a ticket's points (estimate).
     Points(commands::points::Args),
 
@@ -217,6 +221,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::State(args)) => commands::state::run(args),
         Some(Command::Status(args)) => commands::state::run(args),
         Some(Command::Assign(args)) => commands::assign::run(args),
+        Some(Command::Priority(args)) => commands::priority::run(args),
         Some(Command::Points(args)) => commands::points::run(args),
         Some(Command::Milestone(args)) => commands::milestone::run(args),
         Some(Command::Subissue(args)) => commands::subissue::run(args),

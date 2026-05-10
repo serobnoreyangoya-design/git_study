@@ -279,6 +279,7 @@ mod tests {
             status,
             state,
             assigned: assigned.map(String::from),
+            priority: None,
             points: None,
             milestone: None,
             code: None,

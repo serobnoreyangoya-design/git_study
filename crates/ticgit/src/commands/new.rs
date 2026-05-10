@@ -27,6 +27,10 @@ pub struct Args {
     #[arg(short = 'a', long = "assigned")]
     pub assigned: Option<String>,
 
+    /// Initial priority (lower = more important).
+    #[arg(long = "priority")]
+    pub priority: Option<i64>,
+
     /// Create as a sub-issue of this ticket (id or prefix).
     #[arg(short = 'p', long = "subissue")]
     pub subissue: Option<String>,
@@ -89,8 +93,16 @@ pub fn run(args: Args) -> Result<()> {
         parent,
     };
     let mut ticket = store.create(&title, opts)?;
+    let mut needs_reload = false;
     if let Some(description) = description {
         store.set_description(&ticket.id, Some(&description))?;
+        needs_reload = true;
+    }
+    if let Some(priority) = args.priority {
+        store.set_priority(&ticket.id, Some(priority))?;
+        needs_reload = true;
+    }
+    if needs_reload {
         ticket = store.load(&ticket.id)?;
     }
 

@@ -153,6 +153,7 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
             "status".to_string(),
             "state".to_string(),
             "assigned".to_string(),
+            "priority".to_string(),
             "points".to_string(),
             "milestone".to_string(),
             "code".to_string(),

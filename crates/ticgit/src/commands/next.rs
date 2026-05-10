@@ -91,7 +91,11 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     println!("Next: {} - {}", ticket.short_id(), ticket.title);
-    println!("  State: {}  Points: {}", ticket.state.as_str(), ticket.points.map(|p| p.to_string()).unwrap_or_else(|| "-".into()));
+    println!("  State: {}  Priority: {}  Points: {}",
+        ticket.state.as_str(),
+        ticket.priority.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+        ticket.points.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+    );
     if let Some(a) = &ticket.assigned {
         println!("  Assigned: {a}");
     }
@@ -122,7 +126,12 @@ fn score(t: &Ticket) -> i64 {
         s += 20;
     }
 
-    // Prefer higher priority (points)
+    // Prefer lower explicit priority (1 = highest, dominant factor)
+    if let Some(p) = t.priority {
+        s += (100 - p) * 50;
+    }
+
+    // Prefer higher points (estimate)
     if let Some(p) = t.points {
         s += p * 10;
     }

@@ -264,6 +264,20 @@ impl TicketStore {
         Ok(())
     }
 
+    pub fn set_priority(&self, id: &Uuid, priority: Option<i64>) -> Result<()> {
+        let p = self.project_handle();
+        let key = keys::ticket_field(id, "priority");
+        match priority {
+            Some(n) => {
+                p.set(&key, n.to_string().as_str())?;
+            }
+            None => {
+                p.remove(&key)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn set_points(&self, id: &Uuid, points: Option<i64>) -> Result<()> {
         let p = self.project_handle();
         let key = keys::ticket_field(id, "points");
@@ -612,6 +626,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
     let mut legacy_status: Option<TicketStatus> = None;
     let mut legacy_state: Option<TicketState> = None;
     let mut assigned: Option<String> = None;
+    let mut priority: Option<i64> = None;
     let mut points: Option<i64> = None;
     let mut milestone: Option<String> = None;
     let mut code: Option<String> = None;
@@ -655,6 +670,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
                 }
             },
             ("assigned", MetaValue::String(s)) => assigned = Some(s),
+            ("priority", MetaValue::String(s)) => priority = s.parse().ok(),
             ("points", MetaValue::String(s)) => points = s.parse().ok(),
             ("milestone", MetaValue::String(s)) => milestone = Some(s),
             ("code", MetaValue::String(s)) => code = Some(s),
@@ -700,6 +716,7 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         status,
         state,
         assigned,
+        priority,
         points,
         milestone,
         code,

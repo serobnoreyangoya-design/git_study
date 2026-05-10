@@ -40,7 +40,7 @@ ti close
 Create a simple ticket:
 
 ```sh
-ti new --title "Fix parser panic" --tags bug,parser
+ti new --title "Fix parser panic" --tags bug,parser --priority 3
 ```
 
 Create a ticket from a file. The first line is the title; remaining non-empty content is the description:
@@ -190,6 +190,15 @@ ti status review -t <id>           # open:review
 
 Use `blocked` for paused or blocked work. Use `review` when implementation is ready for review. Use `closed:resolved` when implementation is complete.
 Use `ti close` as a shortcut for resolving a ticket; if the closed ticket is checked out, it also clears the checkout.
+
+## Priority
+
+Set an explicit priority on a ticket (lower integer = more important, e.g. 1 is highest priority). Priority is the dominant factor in `ti next` scoring.
+
+```sh
+ti priority -t <id> 3
+ti priority -t <id> --clear
+```
 
 ## Tags, Assignment, Estimates, Milestones
 

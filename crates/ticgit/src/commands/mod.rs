@@ -18,6 +18,7 @@ pub mod next;
 pub mod pull;
 pub mod subissue;
 pub mod points;
+pub mod priority;
 pub mod recent;
 pub mod setup;
 pub mod show;

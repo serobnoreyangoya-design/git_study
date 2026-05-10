@@ -179,6 +179,9 @@ pub fn ticket_detail(t: &Ticket) -> String {
     if let Some(a) = &t.assigned {
         out.push_str(&detail_field("Assigned", a));
     }
+    if let Some(p) = t.priority {
+        out.push_str(&detail_field("Priority", &p.to_string()));
+    }
     if let Some(p) = t.points {
         out.push_str(&detail_field("Points", &p.to_string()));
     }
@@ -423,6 +426,14 @@ fn ticket_details_markdown(t: &Ticket) -> String {
         out,
         "- Assigned: {}",
         optional_inline(t.assigned.as_deref())
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Priority: {}",
+        t.priority
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "none".to_string())
     )
     .unwrap();
     writeln!(
@@ -831,6 +842,7 @@ mod tests {
             status: state.status(),
             state,
             assigned: None,
+            priority: None,
             points: None,
             milestone: None,
             code: None,

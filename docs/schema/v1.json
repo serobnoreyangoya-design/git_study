@@ -29,6 +29,7 @@
         "status",
         "state",
         "assigned",
+        "priority",
         "points",
         "milestone",
         "code",
@@ -88,6 +89,13 @@
             "string",
             "null"
           ]
+        },
+        "priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Ticket priority. Lower values = more important (1 is highest)."
         },
         "points": {
           "type": [
