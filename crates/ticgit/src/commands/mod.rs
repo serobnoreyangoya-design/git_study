@@ -13,6 +13,7 @@ pub mod list;
 pub mod meta;
 pub mod milestone;
 pub mod new;
+pub mod next;
 pub mod pull;
 pub mod subissue;
 pub mod points;

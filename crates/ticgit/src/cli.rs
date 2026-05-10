@@ -26,6 +26,7 @@ Create & Browse:
 
 Work on Tickets:
   checkout, co  Select a ticket as \"current\"
+  next          Pick the next best ticket and check it out
   edit          Edit a ticket's title and description
   comment       Add a comment to a ticket
   state         Change a ticket's lifecycle status/state
@@ -113,6 +114,9 @@ pub enum Command {
     #[command(visible_alias = "co", next_help_heading = "Work on Tickets")]
     Checkout(commands::checkout::Args),
 
+    /// Pick the next best ticket to work on and check it out.
+    Next(commands::next::Args),
+
     /// Edit a ticket's title and description in your editor.
     Edit(commands::edit::Args),
 
@@ -198,6 +202,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::List(args)) => commands::list::run(args),
         Some(Command::Show(args)) => commands::show::run(args),
         Some(Command::Checkout(args)) => commands::checkout::run(args),
+        Some(Command::Next(args)) => commands::next::run(args),
         Some(Command::Close(args)) => commands::close::run(args),
         Some(Command::Edit(args)) => commands::edit::run(args),
         Some(Command::Stats(args)) => commands::stats::run(args),
