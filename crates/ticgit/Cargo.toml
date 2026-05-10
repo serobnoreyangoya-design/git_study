@@ -35,6 +35,7 @@ ratatui     = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 tempfile    = { workspace = true }
+soe         = { workspace = true }
 time        = { workspace = true }
 unicode-width = { workspace = true }
 uuid        = { workspace = true }

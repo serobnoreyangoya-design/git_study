@@ -35,7 +35,7 @@
         </header>
 
         <h1>Ticket Fields</h1>
-        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti meta</code>, <code>ti edit</code></p>
+        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti meta</code>, <code>ti edit</code></p>
         <p>Every ticket has a set of built-in fields. These commands let you set them without opening an editor.</p>
 
         <h2>Tags</h2>
@@ -111,6 +111,56 @@
             <div class="line"><span class="prompt">$</span> ti milestone --clear</div>
           </div>
         </div>
+
+        <h2>Sub-issues</h2>
+        <p>Tickets can be organized into parent/child hierarchies. A child ticket has a single parent, and a parent ticket lists all its children.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>MAKE A SUB-ISSUE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti subissue a3f</div>
+            <div class="line dim">Makes the checked-out ticket a sub-issue of a3f.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti subissue --ticket b7e a3f</div>
+            <div class="line dim">Makes b7e a sub-issue of a3f.</div>
+          </div>
+        </div>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>CLEAR SUB-ISSUE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti subissue --clear</div>
+            <div class="line dim">Removes the sub-issue relationship from the checked-out ticket.</div>
+          </div>
+        </div>
+
+        <p>You can also create a ticket as a sub-issue in one step:</p>
+        <div class="terminal dark">
+          <div class="term-header"><span>CREATE AS SUB-ISSUE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti new --title "fix edge case" --subissue a3f</div>
+            <div class="line dim">Created: c4d81b (sub-issue of a3f29c)</div>
+          </div>
+        </div>
+
+        <p>When a ticket has a parent or children, <code>ti show</code> displays the relationships:</p>
+        <div class="terminal dark">
+          <div class="term-header"><span>PARENT &amp; CHILDREN IN TI SHOW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti show a3f</div>
+            <div class="line dim">-----------------------------------------------------------</div>
+            <div class="line dim">Title&nbsp;&nbsp;&nbsp;&nbsp;: Refactor auth middleware</div>
+            <div class="line dim">Id&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: a3f29c84-d6ec-3da1-a180-0a33fb090d59</div>
+            <div class="line dim">Created&nbsp;&nbsp;: 2026-05-09 (0d)  by alice@example.com</div>
+            <div class="line dim">Status&nbsp;&nbsp;&nbsp;: open</div>
+            <div class="line dim">State&nbsp;&nbsp;&nbsp;&nbsp;: in-progress</div>
+            <div class="line dim">Children : c4d81b, e9f2a1</div>
+            <div class="line dim">Tags&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: security, refactor</div>
+            <div class="line dim">...</div>
+          </div>
+        </div>
+
+        <p>Circular chains are detected and rejected. A ticket cannot be its own ancestor.</p>
 
         <h2>Spec</h2>
         <p>The spec field holds implementation specifications -- the "how", separate from the description's "what/why". It's a top-level ticket field like title and description.</p>
@@ -227,6 +277,8 @@
             <div class="line">&nbsp;&nbsp;"points": 5,</div>
             <div class="line">&nbsp;&nbsp;"milestone": "v2.0",</div>
             <div class="line">&nbsp;&nbsp;"tags": ["bug", "urgent"],</div>
+            <div class="line">&nbsp;&nbsp;"parent": "7b2e4f91-...",</div>
+            <div class="line">&nbsp;&nbsp;"children": ["c4d81b23-...", "e9f2a1d7-..."],</div>
             <div class="line">&nbsp;&nbsp;"meta": { "branch": "feature/fix-parser" },</div>
             <div class="line">&nbsp;&nbsp;"comments": [...],</div>
             <div class="line">&nbsp;&nbsp;"created_at": "2026-05-01T10:30:00Z",</div>

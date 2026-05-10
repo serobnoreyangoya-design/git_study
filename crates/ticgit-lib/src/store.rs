@@ -95,6 +95,20 @@ impl TicketStore {
             }
         }
 
+        if let Some(parent_id) = opts.parent {
+            // Validate parent exists
+            self.load(&parent_id)?;
+            p.set(
+                &keys::ticket_field(&id, "parent"),
+                parent_id.to_string().as_str(),
+            )?;
+            // Denormalize: add child to parent's children set
+            p.set_add(
+                &keys::ticket_field(&parent_id, "children"),
+                &id.to_string(),
+            )?;
+        }
+
         if let Some(body) = opts.comment {
             self.push_comment(&p, &id, &body)?;
         }
@@ -278,6 +292,91 @@ impl TicketStore {
         Ok(())
     }
 
+    pub fn set_code(&self, id: &Uuid, code: Option<&str>) -> Result<()> {
+        let p = self.project_handle();
+        let key = keys::ticket_field(id, "code");
+        match code {
+            Some(c) if !c.is_empty() => {
+                crate::ticket::validate_code_uri(c)?;
+                p.set(&key, c)?;
+            }
+            _ => {
+                p.remove(&key)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Set the parent of a ticket. Validates that the parent exists and
+    /// prevents self-reference and circular chains.
+    pub fn set_parent(&self, child_id: &Uuid, parent_id: &Uuid) -> Result<()> {
+        if child_id == parent_id {
+            return Err(Error::InvalidValue(
+                "a ticket cannot be its own parent".to_string(),
+            ));
+        }
+
+        // Validate parent exists
+        let parent = self.load(parent_id)?;
+
+        // Prevent circular chains: walk ancestors up to depth 20
+        let mut ancestor_id = parent.parent;
+        let mut depth = 0;
+        while let Some(aid) = ancestor_id {
+            if aid == *child_id {
+                return Err(Error::InvalidValue(
+                    "circular parent chain detected".to_string(),
+                ));
+            }
+            depth += 1;
+            if depth > 20 {
+                break;
+            }
+            ancestor_id = self.load(&aid).ok().and_then(|t| t.parent);
+        }
+
+        let p = self.project_handle();
+
+        // Remove from old parent's children set if any
+        let child = self.load(child_id)?;
+        if let Some(old_parent) = child.parent {
+            p.set_remove(
+                &keys::ticket_field(&old_parent, "children"),
+                &child_id.to_string(),
+            )?;
+        }
+
+        // Set the parent field on the child
+        p.set(
+            &keys::ticket_field(child_id, "parent"),
+            parent_id.to_string().as_str(),
+        )?;
+
+        // Add to new parent's children set
+        p.set_add(
+            &keys::ticket_field(parent_id, "children"),
+            &child_id.to_string(),
+        )?;
+
+        Ok(())
+    }
+
+    /// Remove the parent of a ticket.
+    pub fn clear_parent(&self, child_id: &Uuid) -> Result<()> {
+        let child = self.load(child_id)?;
+        let p = self.project_handle();
+
+        if let Some(old_parent) = child.parent {
+            p.set_remove(
+                &keys::ticket_field(&old_parent, "children"),
+                &child_id.to_string(),
+            )?;
+        }
+
+        p.remove(&keys::ticket_field(child_id, "parent"))?;
+        Ok(())
+    }
+
     pub fn set_meta(&self, id: &Uuid, field: &str, value: &str) -> Result<()> {
         let field = field.trim();
         if field.is_empty() {
@@ -457,6 +556,9 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
     let mut assigned: Option<String> = None;
     let mut points: Option<i64> = None;
     let mut milestone: Option<String> = None;
+    let mut code: Option<String> = None;
+    let mut parent: Option<Uuid> = None;
+    let mut children: BTreeSet<Uuid> = BTreeSet::new();
     let mut tags: BTreeSet<String> = BTreeSet::new();
     let mut meta: BTreeMap<String, String> = BTreeMap::new();
     let mut comments: Vec<Comment> = Vec::new();
@@ -495,6 +597,11 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
             ("assigned", MetaValue::String(s)) => assigned = Some(s),
             ("points", MetaValue::String(s)) => points = s.parse().ok(),
             ("milestone", MetaValue::String(s)) => milestone = Some(s),
+            ("code", MetaValue::String(s)) => code = Some(s),
+            ("parent", MetaValue::String(s)) => parent = Uuid::parse_str(&s).ok(),
+            ("children", MetaValue::Set(members)) => {
+                children = members.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect();
+            }
             ("tags", MetaValue::Set(members)) => tags = members,
             ("comments", MetaValue::List(entries)) => comments = decode_comments(entries),
             (field, MetaValue::String(s)) if field.starts_with("meta:") => {
@@ -529,6 +636,9 @@ fn build_ticket(id: Uuid, fields: Vec<(String, MetaValue)>) -> Option<Ticket> {
         assigned,
         points,
         milestone,
+        code,
+        parent,
+        children,
         tags,
         meta,
         comments,
@@ -570,6 +680,7 @@ mod tests {
             comment: Some("first comment".into()),
             tags: vec!["bug".into(), "ui".into()],
             assigned: Some("scott@example.com".into()),
+            parent: None,
         };
         let created = store.create("My new ticket", opts).unwrap();
         assert_eq!(created.title, "My new ticket");
@@ -776,5 +887,88 @@ mod tests {
             store.schema_version().unwrap().as_deref(),
             Some(keys::SCHEMA_VERSION),
         );
+    }
+
+    #[test]
+    fn parent_child_round_trips() {
+        let (store, _td) = test_store();
+        let parent = store.create("epic", NewTicketOpts::default()).unwrap();
+        let child = store
+            .create(
+                "sub-task",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(child.parent, Some(parent.id));
+        let parent = store.load(&parent.id).unwrap();
+        assert!(parent.children.contains(&child.id));
+    }
+
+    #[test]
+    fn set_parent_and_clear_parent() {
+        let (store, _td) = test_store();
+        let epic = store.create("epic", NewTicketOpts::default()).unwrap();
+        let task = store.create("task", NewTicketOpts::default()).unwrap();
+
+        // Set parent
+        store.set_parent(&task.id, &epic.id).unwrap();
+        let task = store.load(&task.id).unwrap();
+        assert_eq!(task.parent, Some(epic.id));
+        let epic = store.load(&epic.id).unwrap();
+        assert!(epic.children.contains(&task.id));
+
+        // Clear parent
+        store.clear_parent(&task.id).unwrap();
+        let task = store.load(&task.id).unwrap();
+        assert_eq!(task.parent, None);
+        let epic = store.load(&epic.id).unwrap();
+        assert!(!epic.children.contains(&task.id));
+    }
+
+    #[test]
+    fn set_parent_rejects_self_reference() {
+        let (store, _td) = test_store();
+        let t = store.create("x", NewTicketOpts::default()).unwrap();
+        assert!(store.set_parent(&t.id, &t.id).is_err());
+    }
+
+    #[test]
+    fn set_parent_rejects_circular_chain() {
+        let (store, _td) = test_store();
+        let a = store.create("a", NewTicketOpts::default()).unwrap();
+        let b = store.create("b", NewTicketOpts::default()).unwrap();
+        let c = store.create("c", NewTicketOpts::default()).unwrap();
+
+        store.set_parent(&b.id, &a.id).unwrap();
+        store.set_parent(&c.id, &b.id).unwrap();
+        // a -> b -> c, now trying c -> a would be circular
+        assert!(store.set_parent(&a.id, &c.id).is_err());
+    }
+
+    #[test]
+    fn reparent_moves_child_between_parents() {
+        let (store, _td) = test_store();
+        let p1 = store.create("parent1", NewTicketOpts::default()).unwrap();
+        let p2 = store.create("parent2", NewTicketOpts::default()).unwrap();
+        let child = store
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(p1.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Move child from p1 to p2
+        store.set_parent(&child.id, &p2.id).unwrap();
+        let p1 = store.load(&p1.id).unwrap();
+        let p2 = store.load(&p2.id).unwrap();
+        assert!(!p1.children.contains(&child.id));
+        assert!(p2.children.contains(&child.id));
     }
 }

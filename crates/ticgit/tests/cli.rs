@@ -155,6 +155,9 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
             "assigned".to_string(),
             "points".to_string(),
             "milestone".to_string(),
+            "code".to_string(),
+            "parent".to_string(),
+            "children".to_string(),
             "tags".to_string(),
             "meta".to_string(),
             "comments".to_string(),
@@ -297,14 +300,14 @@ fn version_flags_print_cargo_version() {
 }
 
 #[test]
-fn help_lists_sync_but_not_push_or_pull() {
+fn help_lists_sync_and_pull_but_not_push() {
     let mut cmd = assert_cmd::Command::cargo_bin("ti").expect("ti binary");
     cmd.arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains("sync"))
-        .stdout(predicate::str::contains(" push ").not())
-        .stdout(predicate::str::contains(" pull ").not());
+        .stdout(predicate::str::contains("pull"))
+        .stdout(predicate::str::contains(" push ").not());
 }
 
 #[test]

@@ -178,6 +178,24 @@ pub fn ticket_detail(t: &Ticket) -> String {
     if let Some(m) = &t.milestone {
         out.push_str(&detail_field("Milestone", m));
     }
+    if let Some(code) = &t.code {
+        out.push_str(&detail_field("Code", &ansi(ANSI_CYAN, code)));
+    }
+    if let Some(parent_id) = &t.parent {
+        let short: String = parent_id.to_string().chars().take(6).collect();
+        out.push_str(&detail_field("Parent", &ansi(ANSI_CYAN, &short)));
+    }
+    if !t.children.is_empty() {
+        let child_ids: Vec<String> = t
+            .children
+            .iter()
+            .map(|c| c.to_string().chars().take(6).collect())
+            .collect();
+        out.push_str(&detail_field(
+            "Children",
+            &ansi(ANSI_CYAN, &child_ids.join(", ")),
+        ));
+    }
     if let Some(spec) = &t.spec {
         let first_line = spec.lines().next().unwrap_or("");
         out.push_str(&detail_field("Spec", &ansi(ANSI_DIM, first_line)));
@@ -390,6 +408,12 @@ fn ticket_details_markdown(t: &Ticket) -> String {
         out,
         "- Milestone: {}",
         optional_inline(t.milestone.as_deref())
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Code: {}",
+        optional_inline(t.code.as_deref())
     )
     .unwrap();
     writeln!(out, "- Tags: {}", tags_inline(t)).unwrap();
@@ -780,6 +804,9 @@ mod tests {
             assigned: None,
             points: None,
             milestone: None,
+            code: None,
+            parent: None,
+            children: BTreeSet::new(),
             tags: BTreeSet::new(),
             meta: BTreeMap::new(),
             comments: Vec::new(),

@@ -37,7 +37,9 @@ pub mod test_support;
 pub use error::{Error, Result};
 pub use query::{Filter, SearchFilter, SearchScope, SortKey, SortOrder};
 pub use store::TicketStore;
-pub use ticket::{Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus};
+pub use ticket::{
+    validate_code_uri, Comment, NewTicketOpts, Ticket, TicketLifecycle, TicketState, TicketStatus,
+};
 
 /// Re-exported for callers who want to talk to git-meta directly.
 pub use git_meta_lib::{MetaValue, Session, Target};

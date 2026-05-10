@@ -70,6 +70,7 @@ fn run_gh(args: GhArgs) -> Result<()> {
             comment: None,
             tags: issue_tags(&issue),
             assigned: primary_assignee(&issue),
+            parent: None,
         };
         let ticket = store.create(&issue.title, opts)?;
         store.set_description(&ticket.id, Some(&issue_description(&issue)))?;

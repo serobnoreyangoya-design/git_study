@@ -2694,6 +2694,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
+name = "soe"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "ratatui",
+ "tempfile",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2878,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "ticgit"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2891,6 +2901,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "soe",
  "tempfile",
  "ticgit-lib",
  "time",
@@ -2900,7 +2911,7 @@ dependencies = [
 
 [[package]]
 name = "ticgit-lib"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "git-meta-lib",
  "gix",

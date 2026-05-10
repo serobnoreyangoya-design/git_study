@@ -213,6 +213,9 @@ pub struct Ticket {
     pub assigned: Option<String>,
     pub points: Option<i64>,
     pub milestone: Option<String>,
+    pub code: Option<String>,
+    pub parent: Option<Uuid>,
+    pub children: BTreeSet<Uuid>,
     pub tags: BTreeSet<String>,
     pub meta: BTreeMap<String, String>,
     pub comments: Vec<Comment>,
@@ -242,6 +245,44 @@ impl Ticket {
     }
 }
 
+/// Validate a code URI in the format `https://<host>/<path>:<branch>`.
+///
+/// Returns `Ok(())` if valid, or an error describing the problem.
+pub fn validate_code_uri(uri: &str) -> Result<()> {
+    // Strip the scheme to find the branch separator (the last colon in
+    // the host+path portion, not the scheme's colon).
+    let after_scheme = if let Some(rest) = uri.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = uri.strip_prefix("http://") {
+        rest
+    } else {
+        return Err(Error::InvalidValue(format!(
+            "code URL must start with http:// or https://, got: {uri}"
+        )));
+    };
+
+    // The branch separator is the last colon in the remaining string.
+    let (host_path, branch) = after_scheme.rsplit_once(':').ok_or_else(|| {
+        Error::InvalidValue(format!(
+            "code URI must be <http-url>:<branch> (e.g. https://github.com/user/repo:branch), got: {uri}"
+        ))
+    })?;
+
+    if !host_path.contains('/') {
+        return Err(Error::InvalidValue(format!(
+            "code URL must include a repo path (e.g. https://github.com/user/repo:branch), got: {uri}"
+        )));
+    }
+
+    if branch.is_empty() {
+        return Err(Error::InvalidValue(
+            "branch name cannot be empty in code URI".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn normalize_lifecycle_value(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace('_', "-")
 }
@@ -252,6 +293,7 @@ pub struct NewTicketOpts {
     pub comment: Option<String>,
     pub tags: Vec<String>,
     pub assigned: Option<String>,
+    pub parent: Option<Uuid>,
 }
 
 #[cfg(test)]
@@ -316,6 +358,9 @@ mod tests {
             assigned: None,
             points: None,
             milestone: None,
+            code: None,
+            parent: None,
+            children: BTreeSet::new(),
             tags: BTreeSet::new(),
             meta: BTreeMap::new(),
             comments: vec![],
@@ -337,6 +382,9 @@ mod tests {
             assigned: Some("jeff.welling@gmail.com".into()),
             points: None,
             milestone: None,
+            code: None,
+            parent: None,
+            children: BTreeSet::new(),
             tags: BTreeSet::new(),
             meta: BTreeMap::new(),
             comments: vec![],
@@ -358,6 +406,9 @@ mod tests {
             assigned: Some("jdoe".into()),
             points: None,
             milestone: None,
+            code: None,
+            parent: None,
+            children: BTreeSet::new(),
             tags: BTreeSet::new(),
             meta: BTreeMap::new(),
             comments: vec![],
@@ -365,5 +416,24 @@ mod tests {
             created_by: "x".into(),
         };
         assert_eq!(t.assigned_short().as_deref(), Some("jdoe"));
+    }
+
+    #[test]
+    fn validate_code_uri_accepts_valid_formats() {
+        assert!(validate_code_uri("https://github.com/schacon/ticgit:sc-branch-1").is_ok());
+        assert!(validate_code_uri("https://gitlab.com/group/project:main").is_ok());
+        assert!(validate_code_uri("http://example.com/repo:feature/fix").is_ok());
+    }
+
+    #[test]
+    fn validate_code_uri_rejects_invalid_formats() {
+        // No colon separator
+        assert!(validate_code_uri("https://github.com/schacon/ticgit").is_err());
+        // Not HTTP
+        assert!(validate_code_uri("git@github.com:schacon/ticgit:main").is_err());
+        // Empty branch
+        assert!(validate_code_uri("https://github.com/schacon/ticgit:").is_err());
+        // No path after host
+        assert!(validate_code_uri("https://github.com:main").is_err());
     }
 }

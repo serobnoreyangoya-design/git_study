@@ -31,6 +31,9 @@
         "assigned",
         "points",
         "milestone",
+        "code",
+        "parent",
+        "children",
         "tags",
         "meta",
         "comments",
@@ -95,6 +98,28 @@
             "string",
             "null"
           ]
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Git URI in the format https://<host>/<path>:<branch>"
+        },
+        "parent": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "uniqueItems": true
         },
         "tags": {
           "type": "array",

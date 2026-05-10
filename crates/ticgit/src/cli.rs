@@ -36,15 +36,19 @@ Ticket Fields:
   assign     Set or clear assigned user
   points     Set or clear points (estimate)
   milestone  Set or clear milestone
+  subissue   Make a ticket a sub-issue of another
+  code       Set or clear a code URI (repo + branch)
   meta       Set a custom metadata field
 
 Views & Import:
   save-view  Save a filtered list as a named view
   views      Show a saved view
+  stats      Show a ticket stats dashboard
   import     Import tickets from external systems (e.g. GitHub)
 
 Sync & Setup:
   sync       Sync ticket metadata with a Git remote
+  pull       Pull tickets from a fork or remote URL
   init       Initialise ticgit on the current repo
   setup      Configure git-meta remote from .git-meta
   update     Update ti to the latest release
@@ -139,6 +143,12 @@ pub enum Command {
     /// Set or clear a ticket's milestone.
     Milestone(commands::milestone::Args),
 
+    /// Make a ticket a sub-issue of another ticket.
+    Subissue(commands::subissue::Args),
+
+    /// Set or clear a code URI (https://host/path:branch) for associated code.
+    Code(commands::code::Args),
+
     /// Set or clear a ticket's implementation spec.
     Spec(commands::spec::Args),
 
@@ -154,6 +164,9 @@ pub enum Command {
     /// Show a saved view.
     Views(commands::view::ListArgs),
 
+    /// Show a ticket stats dashboard.
+    Stats(commands::stats::Args),
+
     /// Import tickets from external systems.
     Import(commands::import::Args),
 
@@ -162,6 +175,9 @@ pub enum Command {
     /// Sync ticket metadata with a Git remote (pull then push).
     #[command(next_help_heading = "Sync & Setup")]
     Sync(commands::sync::Args),
+
+    /// Pull tickets from a fork or remote URL.
+    Pull(commands::pull::Args),
 
     /// Initialise ticgit metadata on the current repo (idempotent).
     Init,
@@ -184,6 +200,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Checkout(args)) => commands::checkout::run(args),
         Some(Command::Close(args)) => commands::close::run(args),
         Some(Command::Edit(args)) => commands::edit::run(args),
+        Some(Command::Stats(args)) => commands::stats::run(args),
         Some(Command::Import(args)) => commands::import::run(args),
         Some(Command::Recent(args)) => commands::recent::run(args),
         Some(Command::Tui(args)) => commands::tui::run(args),
@@ -193,12 +210,15 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Assign(args)) => commands::assign::run(args),
         Some(Command::Points(args)) => commands::points::run(args),
         Some(Command::Milestone(args)) => commands::milestone::run(args),
+        Some(Command::Subissue(args)) => commands::subissue::run(args),
+        Some(Command::Code(args)) => commands::code::run(args),
         Some(Command::Spec(args)) => commands::spec::run(args),
         Some(Command::Meta(args)) => commands::meta::run(args),
         Some(Command::Comment(args)) => commands::comment::run(args),
         Some(Command::SaveView(args)) => commands::view::run_save(args),
         Some(Command::Views(args)) => commands::view::run_list(args),
         Some(Command::Sync(args)) => commands::sync::run_sync(args),
+        Some(Command::Pull(args)) => commands::pull::run(args),
         Some(Command::Update(args)) => commands::update::run(args),
     }
 }

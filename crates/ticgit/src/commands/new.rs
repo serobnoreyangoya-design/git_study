@@ -27,6 +27,10 @@ pub struct Args {
     #[arg(short = 'a', long = "assigned")]
     pub assigned: Option<String>,
 
+    /// Create as a sub-issue of this ticket (id or prefix).
+    #[arg(short = 'p', long = "subissue")]
+    pub subissue: Option<String>,
+
     /// Initial comment body. Use `--comment-edit` to compose in `$EDITOR`.
     #[arg(long = "comment")]
     pub comment: Option<String>,
@@ -73,10 +77,16 @@ pub fn run(args: Args) -> Result<()> {
 
     let tags = parse_tags(args.tags.as_deref());
 
+    let parent = args
+        .subissue
+        .map(|p| store.resolve_id(&p))
+        .transpose()?;
+
     let opts = NewTicketOpts {
         comment,
         tags,
         assigned: args.assigned,
+        parent,
     };
     let mut ticket = store.create(&title, opts)?;
     if let Some(description) = description {
