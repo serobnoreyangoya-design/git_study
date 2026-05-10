@@ -188,18 +188,18 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     if let Some(order) = filter.order {
         tickets.sort_by(|a, b| compare(a, b, order.key, order.desc));
     } else {
-        // Stable default: open tickets first, then by lifecycle state and created date desc.
+        // Stable default: open first, then by priority (lower = more important),
+        // then by recency (newer first).
         tickets.sort_by(|a, b| {
             let by_status = status_rank(a.status).cmp(&status_rank(b.status));
             if by_status != Ordering::Equal {
                 return by_status;
             }
-            let by_state = state_rank(a.state).cmp(&state_rank(b.state));
-            if by_state != Ordering::Equal {
-                by_state
-            } else {
-                b.created_at.cmp(&a.created_at)
+            let by_priority = priority_rank(a.priority).cmp(&priority_rank(b.priority));
+            if by_priority != Ordering::Equal {
+                return by_priority;
             }
+            b.created_at.cmp(&a.created_at)
         });
     }
 
@@ -221,6 +221,15 @@ fn state_rank(s: TicketState) -> u8 {
         TicketState::Wontfix => 6,
         TicketState::Duplicate => 7,
         TicketState::Invalid => 8,
+    }
+}
+
+/// Tickets with a priority sort before those without; among prioritised
+/// tickets, lower numbers come first (1 = most important).
+fn priority_rank(p: Option<i64>) -> (u8, i64) {
+    match p {
+        Some(v) => (0, v),
+        None => (1, 0),
     }
 }
 
@@ -427,37 +436,64 @@ mod tests {
     }
 
     #[test]
-    fn default_order_puts_open_first_then_newer_first() {
+    fn default_order_puts_open_first_then_priority_then_newer_first() {
+        let mut high_pri = t(
+            "high-pri",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            1,
+        );
+        high_pri.priority = Some(1);
+        let mut low_pri = t(
+            "low-pri",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            50,
+        );
+        low_pri.priority = Some(3);
+        let no_pri_new = t(
+            "no-pri-new",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            80,
+        );
+        let no_pri_old = t(
+            "no-pri-old",
+            TicketStatus::Open,
+            TicketState::New,
+            None,
+            None,
+            10,
+        );
+        let closed = t(
+            "closed",
+            TicketStatus::Closed,
+            TicketState::Resolved,
+            None,
+            None,
+            100,
+        );
         let input = vec![
-            t(
-                "old-open",
-                TicketStatus::Open,
-                TicketState::New,
-                None,
-                None,
-                1,
-            ),
-            t(
-                "new-resolved",
-                TicketStatus::Closed,
-                TicketState::Resolved,
-                None,
-                None,
-                100,
-            ),
-            t(
-                "new-open",
-                TicketStatus::Open,
-                TicketState::New,
-                None,
-                None,
-                50,
-            ),
+            no_pri_old.clone(),
+            closed.clone(),
+            low_pri.clone(),
+            no_pri_new.clone(),
+            high_pri.clone(),
         ];
         let out = apply(input, &Filter::default());
-        assert_eq!(out[0].title, "new-open");
-        assert_eq!(out[1].title, "old-open");
-        assert_eq!(out[2].title, "new-resolved");
+        // Open before closed, priority 1 before 3, prioritised before unprioritised,
+        // then newer before older.
+        assert_eq!(out[0].title, "high-pri");
+        assert_eq!(out[1].title, "low-pri");
+        assert_eq!(out[2].title, "no-pri-new");
+        assert_eq!(out[3].title, "no-pri-old");
+        assert_eq!(out[4].title, "closed");
     }
 
     #[test]

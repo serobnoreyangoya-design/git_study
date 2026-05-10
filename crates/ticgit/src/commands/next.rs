@@ -59,8 +59,15 @@ pub fn run(args: Args) -> Result<()> {
         })
         .collect();
 
+    // Find the max priority value among candidates for relative scoring
+    let max_priority = candidates
+        .iter()
+        .filter_map(|t| t.priority)
+        .max()
+        .unwrap_or(0);
+
     // Rank candidates: higher score = better candidate
-    candidates.sort_by(|a, b| score(b).cmp(&score(a)));
+    candidates.sort_by(|a, b| score(b, max_priority).cmp(&score(a, max_priority)));
 
     let ticket = match candidates.into_iter().next() {
         Some(t) => t,
@@ -108,7 +115,9 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 /// Score a ticket for work priority. Higher = should be worked on first.
-fn score(t: &Ticket) -> i64 {
+/// `max_priority` is the highest priority value among open candidates,
+/// used to score lower-numbered priorities higher.
+fn score(t: &Ticket, max_priority: i64) -> i64 {
     let mut s: i64 = 0;
 
     // Prefer tickets already in progress
@@ -128,7 +137,7 @@ fn score(t: &Ticket) -> i64 {
 
     // Prefer lower explicit priority (1 = highest, dominant factor)
     if let Some(p) = t.priority {
-        s += (100 - p) * 50;
+        s += (max_priority + 1 - p) * 50;
     }
 
     // Prefer higher points (estimate)

@@ -233,13 +233,14 @@ ti show <id> --filter .meta.branch
 
 ## Saved Views
 
-Save filtered lists for repeatable queues:
+Save the last `ti list` filters as a named view, then recall them:
 
 ```sh
-ti save-view bugs --tag bug
-ti list --view bugs
+ti list --tag bug
+ti views save bugs
+ti list bugs
 ti views
-ti views bugs
+ti views delete bugs
 ```
 
 ## Sync

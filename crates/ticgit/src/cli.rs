@@ -44,8 +44,7 @@ Ticket Fields:
   meta       Set a custom metadata field
 
 Views & Import:
-  save-view  Save a filtered list as a named view
-  views      Show a saved view
+  views      Manage saved views (save, delete, list)
   stats      Show a ticket stats dashboard
   import     Import tickets from external systems (e.g. GitHub)
 
@@ -64,7 +63,9 @@ Agents:
 
 Examples:
   ti new --title \"fix the parser\" --tags bug
-  ti list --tag bug --status open
+  ti list --tag bug
+  ti views save bugs
+  ti list bugs
   ti show a3f
   ti checkout a3f && ti comment \"on it\"
   ti state resolved --ticket a3f
@@ -169,12 +170,9 @@ pub enum Command {
 
     // -- Views & import ---------------------------------------------------
 
-    /// Save the result of `ti list` (with filters) as a named view.
+    /// Manage saved views (save, delete, list).
     #[command(next_help_heading = "Views & Import")]
-    SaveView(commands::view::SaveArgs),
-
-    /// Show a saved view.
-    Views(commands::view::ListArgs),
+    Views(commands::view::Args),
 
     /// Show a ticket stats dashboard.
     Stats(commands::stats::Args),
@@ -230,8 +228,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Spec(args)) => commands::spec::run(args),
         Some(Command::Meta(args)) => commands::meta::run(args),
         Some(Command::Comment(args)) => commands::comment::run(args),
-        Some(Command::SaveView(args)) => commands::view::run_save(args),
-        Some(Command::Views(args)) => commands::view::run_list(args),
+        Some(Command::Views(args)) => commands::view::run(args),
         Some(Command::Sync(args)) => commands::sync::run_sync(args),
         Some(Command::Pull(args)) => commands::pull::run(args),
         Some(Command::Update(args)) => commands::update::run(args),

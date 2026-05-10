@@ -20,6 +20,45 @@ use uuid::Uuid;
 pub struct State {
     /// Map of canonicalised git-dir path → currently checked-out ticket UUID.
     pub current: HashMap<String, Uuid>,
+    /// Map of canonicalised git-dir path → last-used list filters.
+    #[serde(default)]
+    pub last_filters: HashMap<String, SavedView>,
+    /// Map of canonicalised git-dir path → named saved views.
+    #[serde(default)]
+    pub views: HashMap<String, HashMap<String, SavedView>>,
+}
+
+/// A saved set of list filter parameters.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SavedView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assigned: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub only_tagged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub all: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub subissues: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub limit: usize,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
+}
+
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 fn state_file() -> Result<PathBuf> {
@@ -69,6 +108,43 @@ impl State {
 
     pub fn clear_current(&mut self, git_dir: &Path) {
         self.current.remove(&key_for(git_dir));
+    }
+
+    pub fn set_last_filters(&mut self, git_dir: &Path, view: SavedView) {
+        self.last_filters.insert(key_for(git_dir), view);
+    }
+
+    pub fn last_filters_for(&self, git_dir: &Path) -> Option<&SavedView> {
+        self.last_filters.get(&key_for(git_dir))
+    }
+
+    pub fn save_view(&mut self, git_dir: &Path, name: &str, view: SavedView) {
+        self.views
+            .entry(key_for(git_dir))
+            .or_default()
+            .insert(name.to_string(), view);
+    }
+
+    pub fn load_view(&self, git_dir: &Path, name: &str) -> Option<&SavedView> {
+        self.views.get(&key_for(git_dir))?.get(name)
+    }
+
+    pub fn delete_view(&mut self, git_dir: &Path, name: &str) -> bool {
+        if let Some(repo_views) = self.views.get_mut(&key_for(git_dir)) {
+            return repo_views.remove(name).is_some();
+        }
+        false
+    }
+
+    pub fn list_views(&self, git_dir: &Path) -> Vec<(String, SavedView)> {
+        self.views
+            .get(&key_for(git_dir))
+            .map(|m| {
+                let mut v: Vec<_> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                v.sort_by(|a, b| a.0.cmp(&b.0));
+                v
+            })
+            .unwrap_or_default()
     }
 }
 

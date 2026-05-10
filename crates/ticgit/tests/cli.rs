@@ -916,8 +916,9 @@ fn list_filters_and_saved_views_work() {
         .stdout(predicate::str::contains("bug ticket"))
         .stdout(predicate::str::contains("docs ticket").not());
 
+    // Save the last list filters as a view.
     repo.ti()
-        .args(["save-view", "bugs", "--tag", "bug"])
+        .args(["views", "save", "bugs"])
         .assert()
         .success();
 
@@ -925,14 +926,22 @@ fn list_filters_and_saved_views_work() {
         .args(["views"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("bugs"));
+        .stdout(predicate::str::contains("bugs"))
+        .stdout(predicate::str::contains("--tag bug"));
 
+    // Load the view via `ti list <name>`.
     repo.ti()
-        .args(["views", "bugs"])
+        .args(["list", "bugs"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(&bug))
-        .stdout(predicate::str::contains(&docs).not());
+        .stdout(predicate::str::contains("bug ticket"))
+        .stdout(predicate::str::contains("docs ticket").not());
+
+    // Delete the view.
+    repo.ti()
+        .args(["views", "delete", "bugs"])
+        .assert()
+        .success();
 }
 
 #[test]

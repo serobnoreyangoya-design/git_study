@@ -35,23 +35,32 @@
         </header>
 
         <h1>Views and Import</h1>
-        <p>Commands: <code>ti save-view</code>, <code>ti views</code>, <code>ti stats</code>, <code>ti import</code></p>
+        <p>Commands: <code>ti views</code>, <code>ti stats</code>, <code>ti import</code></p>
 
         <h2>Saved views</h2>
-        <p>Views are named collections of tickets based on filter criteria. They let you save a query you run often.</p>
+        <p>Views save the filters from your last <code>ti list</code> command so you can replay them by name. They store the filter criteria, not a snapshot of ticket IDs — so new tickets matching the filters will appear automatically.</p>
 
         <h3>Create a view</h3>
+        <p>First run <code>ti list</code> with the filters you want, then save them:</p>
         <div class="terminal dark">
           <div class="term-header"><span>SAVE VIEW</span></div>
           <div class="term-body">
-            <div class="line"><span class="prompt">$</span> ti save-view bugs --tag bug --status open</div>
-            <div class="line dim">Saved view: bugs (3 tickets)</div>
+            <div class="line"><span class="prompt">$</span> ti list --tag bug</div>
+            <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;2d&nbsp;&nbsp;&nbsp;&nbsp;fix parser panic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+            <div class="line dim">&nbsp;&nbsp;d91c3a&nbsp;5d&nbsp;&nbsp;&nbsp;&nbsp;null pointer in export&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;assigned&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
             <div class="line">&nbsp;</div>
-            <div class="line"><span class="prompt">$</span> ti save-view my-work --assigned alice@example.com --status open</div>
-            <div class="line dim">Saved view: my-work (7 tickets)</div>
-            <div class="line">&nbsp;</div>
-            <div class="line"><span class="prompt">$</span> ti save-view blocked --state blocked</div>
-            <div class="line dim">Saved view: blocked (2 tickets)</div>
+            <div class="line"><span class="prompt">$</span> ti views save bugs</div>
+            <div class="line dim">Saved view `bugs`: --tag bug</div>
+          </div>
+        </div>
+
+        <h3>Use a view</h3>
+        <div class="terminal dark">
+          <div class="term-header"><span>LIST BY VIEW</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti list bugs</div>
+            <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;2d&nbsp;&nbsp;&nbsp;&nbsp;fix parser panic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+            <div class="line dim">&nbsp;&nbsp;d91c3a&nbsp;5d&nbsp;&nbsp;&nbsp;&nbsp;null pointer in export&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;assigned&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
           </div>
         </div>
 
@@ -60,33 +69,18 @@
           <div class="term-header"><span>LIST VIEWS</span></div>
           <div class="term-body">
             <div class="line"><span class="prompt">$</span> ti views</div>
-            <div class="line dim">bugs</div>
-            <div class="line dim">my-work</div>
-            <div class="line dim">blocked</div>
+            <div class="line dim">&nbsp;&nbsp;bugs --tag bug</div>
+            <div class="line dim">&nbsp;&nbsp;my-work --assigned alice@example.com</div>
+            <div class="line dim">&nbsp;&nbsp;blocked --state blocked</div>
           </div>
         </div>
 
-        <h3>Show a view's tickets</h3>
+        <h3>Delete a view</h3>
         <div class="terminal dark">
-          <div class="term-header"><span>VIEW DETAIL</span></div>
+          <div class="term-header"><span>DELETE VIEW</span></div>
           <div class="term-body">
-            <div class="line"><span class="prompt">$</span> ti views bugs</div>
-            <div class="line dim">a3f29c84-...</div>
-            <div class="line dim">d91c3a12-...</div>
-            <div class="line dim">7b2e4f9a-...</div>
-          </div>
-        </div>
-
-        <h3>Use a view in list</h3>
-        <div class="terminal dark">
-          <div class="term-header"><span>LIST WITH VIEW</span></div>
-          <div class="term-body">
-            <div class="line"><span class="prompt">$</span> ti list --view bugs</div>
-            <div class="line dim">&nbsp;&nbsp;TicId&nbsp;&nbsp;Date&nbsp;&nbsp;&nbsp;Title&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Status&nbsp;State&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Tags</div>
-            <div class="line dim">----------------------------------------------------------------------</div>
-            <div class="line dim">&nbsp;&nbsp;a3f29c&nbsp;2d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;fix parser panic&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;in-progress&nbsp;bug</div>
-            <div class="line dim">&nbsp;&nbsp;d91c3a&nbsp;5d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;null pointer in export&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;new&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
-            <div class="line dim">&nbsp;&nbsp;7b2e4f&nbsp;8d&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;crash on large input&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;open&nbsp;&nbsp;&nbsp;assigned&nbsp;&nbsp;&nbsp;&nbsp;bug</div>
+            <div class="line"><span class="prompt">$</span> ti views delete bugs</div>
+            <div class="line dim">Deleted view `bugs`.</div>
           </div>
         </div>
 

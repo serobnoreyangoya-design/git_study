@@ -4,10 +4,13 @@ use ticgit_lib::{Filter, SearchFilter, SortOrder, TicketLifecycle, TicketStatus}
 
 use crate::commands::{open_store, SessionGitDir};
 use crate::render;
-use crate::session_state::State;
+use crate::session_state::{SavedView, State};
 
 #[derive(Debug, Default, Parser)]
 pub struct Args {
+    /// Load a saved view by name.
+    pub view: Option<String>,
+
     /// Show only tickets in this status/state. Defaults to status open.
     #[arg(short = 's', long = "state")]
     pub state: Option<String>,
@@ -40,10 +43,6 @@ pub struct Args {
     #[arg(short = 'o', long = "order")]
     pub order: Option<String>,
 
-    /// Show tickets that belong to a saved view.
-    #[arg(short = 'V', long = "view")]
-    pub view: Option<String>,
-
     /// Include sub-issues (hidden by default).
     #[arg(long = "subissues")]
     pub subissues: bool,
@@ -63,13 +62,34 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<()> {
     let store = open_store()?;
-    let mut tickets = store.list()?;
+    let git_dir = store.session().repo_git_dir();
+    let tickets = store.list()?;
     let open_ref_lengths = render::open_ticket_ref_lengths(&tickets);
 
-    if let Some(view_name) = &args.view {
-        let ids = store.load_view(view_name)?;
-        tickets.retain(|t| ids.contains(&t.id));
-    }
+    // If a positional arg is given, try to load it as a saved view.
+    let args = if let Some(ref view_name) = args.view {
+        let state = State::load().unwrap_or_default();
+        let saved = state
+            .load_view(&git_dir, view_name)
+            .ok_or_else(|| anyhow::anyhow!("no saved view named `{view_name}`"))?;
+        Args {
+            view: None,
+            state: saved.state.clone(),
+            status: saved.status.clone(),
+            all: saved.all,
+            tag: saved.tag.clone(),
+            assigned: saved.assigned.clone(),
+            only_tagged: saved.only_tagged,
+            search: saved.search.clone(),
+            order: saved.order.clone(),
+            subissues: saved.subissues,
+            limit: if saved.limit > 0 { saved.limit } else { 20 },
+            json: args.json,
+            markdown: args.markdown,
+        }
+    } else {
+        args
+    };
 
     let mut status = match args.status.as_deref() {
         Some(s) => Some(TicketStatus::parse(s)?),
@@ -98,8 +118,8 @@ pub fn run(args: Args) -> Result<()> {
     let filter = Filter {
         status,
         state,
-        tag: args.tag,
-        assigned: args.assigned,
+        tag: args.tag.clone(),
+        assigned: args.assigned.clone(),
         only_tagged: args.only_tagged,
         search,
         order,
@@ -108,6 +128,26 @@ pub fn run(args: Args) -> Result<()> {
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
     if !args.all && args.limit > 0 {
         tickets.truncate(args.limit);
+    }
+
+    // Save last-used filters so `ti views save` can recall them.
+    if args.view.is_none() {
+        let saved = SavedView {
+            status: args.status.clone(),
+            state: args.state.clone(),
+            tag: args.tag.clone(),
+            assigned: args.assigned.clone(),
+            only_tagged: args.only_tagged,
+            search: args.search.clone(),
+            order: args.order.clone(),
+            all: args.all,
+            subissues: args.subissues,
+            limit: args.limit,
+        };
+        if let Ok(mut session_state) = State::load() {
+            session_state.set_last_filters(&git_dir, saved);
+            let _ = session_state.save();
+        }
     }
 
     if args.json {
@@ -126,7 +166,7 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     let session_state = State::load().unwrap_or_default();
-    let current = session_state.current_for(&store.session().repo_git_dir());
+    let current = session_state.current_for(&git_dir);
     println!(
         "{}",
         render::tickets_table_with_refs(&tickets, current.as_ref(), &open_ref_lengths)
