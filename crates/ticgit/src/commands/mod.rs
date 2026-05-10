@@ -8,6 +8,7 @@ pub mod code;
 pub mod depends;
 pub mod comment;
 pub mod edit;
+pub mod history;
 pub mod import;
 pub mod init;
 pub mod list;

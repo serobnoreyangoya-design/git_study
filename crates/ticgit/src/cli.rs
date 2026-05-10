@@ -22,6 +22,7 @@ Create & Browse:
   list, ls   List tickets, with optional filters
   show       Show one ticket and its comments
   recent     Show the most recently touched tickets
+  history    Show change history for a ticket
   tui        Browse open tickets in an interactive terminal UI
 
 Work on Tickets:
@@ -107,6 +108,9 @@ pub enum Command {
 
     /// Show the most recently touched tickets.
     Recent(commands::recent::Args),
+
+    /// Show change history for a ticket.
+    History(commands::history::Args),
 
     /// Browse open tickets in an interactive terminal UI.
     Tui(commands::tui::Args),
@@ -214,6 +218,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Stats(args)) => commands::stats::run(args),
         Some(Command::Import(args)) => commands::import::run(args),
         Some(Command::Recent(args)) => commands::recent::run(args),
+        Some(Command::History(args)) => commands::history::run(args),
         Some(Command::Tui(args)) => commands::tui::run(args),
         Some(Command::Tag(args)) => commands::tag::run(args),
         Some(Command::State(args)) => commands::state::run(args),

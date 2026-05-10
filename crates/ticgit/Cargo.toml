@@ -38,6 +38,7 @@ tempfile    = { workspace = true }
 soe         = { workspace = true }
 time        = { workspace = true }
 unicode-width = { workspace = true }
+rusqlite    = { workspace = true }
 ureq        = { workspace = true }
 uuid        = { workspace = true }
 
