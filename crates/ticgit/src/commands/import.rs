@@ -582,7 +582,6 @@ struct LinearState {
 #[derive(Debug, Deserialize)]
 struct LinearAssignee {
     email: String,
-    name: String,
 }
 
 #[derive(Debug, Deserialize)]
