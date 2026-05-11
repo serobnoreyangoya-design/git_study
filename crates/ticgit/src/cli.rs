@@ -22,6 +22,7 @@ Create & Browse:
   list, ls   List tickets, with optional filters
   show       Show one ticket and its comments
   recent     Show the most recently touched tickets
+  mine       List tickets assigned to you
   history    Show change history for a ticket
   tui        Browse open tickets in an interactive terminal UI
 
@@ -108,6 +109,9 @@ pub enum Command {
 
     /// Show the most recently touched tickets.
     Recent(commands::recent::Args),
+
+    /// List tickets assigned to you (from git config user.email).
+    Mine(commands::list::Args),
 
     /// Show change history for a ticket.
     History(commands::history::Args),
@@ -218,6 +222,20 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Stats(args)) => commands::stats::run(args),
         Some(Command::Import(args)) => commands::import::run(args),
         Some(Command::Recent(args)) => commands::recent::run(args),
+        Some(Command::Mine(mut args)) => {
+            if args.assigned.is_none() {
+                let output = std::process::Command::new("git")
+                    .args(["config", "user.email"])
+                    .output();
+                if let Ok(out) = output {
+                    let email = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !email.is_empty() {
+                        args.assigned = Some(email);
+                    }
+                }
+            }
+            commands::list::run(args)
+        }
         Some(Command::History(args)) => commands::history::run(args),
         Some(Command::Tui(args)) => commands::tui::run(args),
         Some(Command::Tag(args)) => commands::tag::run(args),
