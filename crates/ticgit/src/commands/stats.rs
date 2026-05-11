@@ -12,6 +12,10 @@ pub struct Args {
     /// Output stats as JSON.
     #[arg(long = "json")]
     pub json: bool,
+
+    /// Output stats as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 // ANSI colour helpers
@@ -122,6 +126,66 @@ pub fn run(args: Args) -> Result<()> {
                 "assignees": assignees_json,
             })
         );
+        return Ok(());
+    }
+
+    if args.markdown {
+        // Pre-sort data.
+        let mut state_vec: Vec<_> = states.iter().collect();
+        state_vec.sort_by(|a, b| b.1.cmp(a.1));
+        let mut tag_vec: Vec<_> = tags.iter().collect();
+        tag_vec.sort_by(|a, b| b.1.cmp(a.1));
+        let mut assignee_vec: Vec<_> = assignees.iter().collect();
+        assignee_vec.sort_by(|a, b| b.1.cmp(a.1));
+
+        println!("# Ticket Stats\n");
+        println!("| Metric | Count |");
+        println!("| --- | --- |");
+        println!("| Total | {total} |");
+        println!("| Open | {open} |");
+        println!("| Closed | {closed} |");
+        println!("| With comments | {with_comments} |");
+        if created_7d > 0 {
+            println!("| Created (7d) | {created_7d} |");
+        }
+        if closed_7d > 0 {
+            println!("| Closed (7d) | {closed_7d} |");
+        }
+
+        if !state_vec.is_empty() {
+            println!("\n## States\n");
+            println!("| State | Count |");
+            println!("| --- | --- |");
+            for (state, count) in &state_vec {
+                println!("| {state} | {count} |");
+            }
+        }
+
+        if !tag_vec.is_empty() {
+            println!("\n## Tags\n");
+            println!("| Tag | Count |");
+            println!("| --- | --- |");
+            for (tag, count) in &tag_vec {
+                println!("| {tag} | {count} |");
+            }
+        }
+
+        if !assignee_vec.is_empty() {
+            println!("\n## Assignees\n");
+            println!("| Assignee | Count |");
+            println!("| --- | --- |");
+            for (name, count) in &assignee_vec {
+                println!("| {name} | {count} |");
+            }
+        }
+
+        if !recently_closed.is_empty() {
+            println!("\n## Recently Closed\n");
+            for (id, title) in recently_closed.iter().take(10) {
+                println!("- `{id}` {title}");
+            }
+        }
+
         return Ok(());
     }
 
