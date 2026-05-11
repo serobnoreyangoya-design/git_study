@@ -30,6 +30,7 @@ pub mod sync;
 pub mod tag;
 pub mod update;
 pub mod tui;
+pub mod users;
 pub mod view;
 
 use anyhow::{Context, Result};

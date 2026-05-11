@@ -50,6 +50,10 @@ Views & Import:
   stats      Show a ticket stats dashboard
   import     Import tickets from external systems (e.g. GitHub)
 
+Team:
+  users      Manage user nick/email mappings (shared mailmap)
+  mine       List tickets assigned to you
+
 Sync & Setup:
   sync       Sync ticket metadata with a Git remote
   pull       Pull tickets from a fork or remote URL
@@ -188,6 +192,12 @@ pub enum Command {
     /// Import tickets from external systems.
     Import(commands::import::Args),
 
+    // -- Team ---------------------------------------------------------------
+
+    /// Manage user nick → email mappings (shared mailmap).
+    #[command(next_help_heading = "Team")]
+    Users(commands::users::Args),
+
     // -- Sync & setup -----------------------------------------------------
 
     /// Sync ticket metadata with a Git remote (pull then push).
@@ -252,6 +262,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         Some(Command::Meta(args)) => commands::meta::run(args),
         Some(Command::Comment(args)) => commands::comment::run(args),
         Some(Command::Views(args)) => commands::view::run(args),
+        Some(Command::Users(args)) => commands::users::run(args),
         Some(Command::Sync(args)) => commands::sync::run_sync(args),
         Some(Command::Pull(args)) => commands::pull::run(args),
         Some(Command::Update(args)) => commands::update::run(args),

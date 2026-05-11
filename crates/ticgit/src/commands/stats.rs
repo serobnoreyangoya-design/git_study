@@ -57,6 +57,9 @@ pub fn run(args: Args) -> Result<()> {
     let mut states: BTreeMap<String, usize> = BTreeMap::new();
     let mut tags: BTreeMap<String, usize> = BTreeMap::new();
     let mut assignees: BTreeMap<String, usize> = BTreeMap::new();
+    let nick_map = crate::render::build_nick_map(
+        &store.list_users().unwrap_or_default(),
+    );
 
     // Collect recently closed tickets (by created_at as proxy for activity).
     let mut recently_closed: Vec<(String, String)> = Vec::new(); // (short_id, title)
@@ -90,11 +93,15 @@ pub fn run(args: Args) -> Result<()> {
         }
 
         if let Some(ref a) = t.assigned {
-            let short = a
-                .split_once('@')
-                .map(|(local, _)| local)
-                .unwrap_or(a);
-            *assignees.entry(short.to_string()).or_default() += 1;
+            let short = if let Some(nick) = nick_map.get(a.as_str()) {
+                nick.clone()
+            } else {
+                a.split_once('@')
+                    .map(|(local, _)| local)
+                    .unwrap_or(a)
+                    .to_string()
+            };
+            *assignees.entry(short).or_default() += 1;
         }
     }
 

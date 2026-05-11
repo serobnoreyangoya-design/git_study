@@ -167,9 +167,11 @@ pub fn run(args: Args) -> Result<()> {
 
     let session_state = State::load().unwrap_or_default();
     let current = session_state.current_for(&git_dir);
+    let users = store.list_users().unwrap_or_default();
+    let nicks = render::build_nick_map(&users);
     println!(
         "{}",
-        render::tickets_table_with_refs(&tickets, current.as_ref(), &open_ref_lengths)
+        render::tickets_table_with_refs(&tickets, current.as_ref(), &open_ref_lengths, Some(&nicks))
     );
     Ok(())
 }

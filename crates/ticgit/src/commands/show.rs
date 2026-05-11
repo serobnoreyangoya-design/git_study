@@ -45,7 +45,9 @@ pub fn run(args: Args) -> Result<()> {
     } else if args.markdown {
         println!("{}", render::ticket_markdown(&ticket));
     } else {
-        print!("{}", render::ticket_detail(&ticket));
+        let users = store.list_users().unwrap_or_default();
+        let nicks = render::build_nick_map(&users);
+        print!("{}", render::ticket_detail(&ticket, Some(&nicks)));
     }
     Ok(())
 }

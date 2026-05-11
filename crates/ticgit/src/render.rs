@@ -1,6 +1,6 @@
 //! Terminal output: tables, single-ticket details, JSON, and Markdown.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use ticgit_lib::Ticket;
@@ -8,6 +8,50 @@ use ticgit_lib::TicketStatus;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Mapping of email → nick for display purposes.
+pub type NickMap = HashMap<String, String>;
+
+/// Build a NickMap from the user list returned by `TicketStore::list_users`.
+pub fn build_nick_map(users: &BTreeMap<String, BTreeSet<String>>) -> NickMap {
+    let mut map = HashMap::new();
+    for (nick, emails) in users {
+        for email in emails {
+            map.insert(email.clone(), nick.clone());
+        }
+    }
+    map
+}
+
+/// Resolve an email to its nick for display, or return the email as-is.
+pub fn display_name(email: &str, nicks: Option<&NickMap>) -> String {
+    if let Some(map) = nicks {
+        if let Some(nick) = map.get(email) {
+            return nick.clone();
+        }
+    }
+    email.to_string()
+}
+
+/// Like `assigned_short()` but prefers nick if available.
+fn display_assigned_short(assigned: Option<&str>, nicks: Option<&NickMap>) -> String {
+    match assigned {
+        Some(email) => {
+            if let Some(map) = nicks {
+                if let Some(nick) = map.get(email) {
+                    return nick.clone();
+                }
+            }
+            // fallback: local part of email
+            email
+                .split_once('@')
+                .map(|(local, _)| local)
+                .unwrap_or(email)
+                .to_string()
+        }
+        None => String::new(),
+    }
+}
 
 const ANSI_RESET: &str = "\x1b[0m";
 const ANSI_DIM: &str = "\x1b[2m";
@@ -20,7 +64,7 @@ const ANSI_CYAN: &str = "\x1b[36m";
 /// Render a list of tickets as a compact table. `current` (if any) gets a `*`.
 pub fn tickets_table(tickets: &[Ticket], current: Option<&uuid::Uuid>) -> String {
     let ref_lengths = open_ticket_ref_lengths(tickets);
-    tickets_table_with_refs(tickets, current, &ref_lengths)
+    tickets_table_with_refs(tickets, current, &ref_lengths, None)
 }
 
 /// Render a list with caller-provided open-ticket short reference lengths.
@@ -28,6 +72,7 @@ pub fn tickets_table_with_refs(
     tickets: &[Ticket],
     current: Option<&uuid::Uuid>,
     ref_lengths: &BTreeMap<uuid::Uuid, usize>,
+    nicks: Option<&NickMap>,
 ) -> String {
     let width = crossterm::terminal::size()
         .map(|(columns, _)| columns as usize)
@@ -39,6 +84,7 @@ pub fn tickets_table_with_refs(
         ref_lengths,
         width,
         OffsetDateTime::now_utc(),
+        nicks,
     )
 }
 
@@ -73,6 +119,7 @@ fn tickets_table_with_width(
     ref_lengths: &BTreeMap<uuid::Uuid, usize>,
     width: usize,
     now: OffsetDateTime,
+    nicks: Option<&NickMap>,
 ) -> String {
     let id_width = ref_lengths.values().copied().max().unwrap_or(6).max(6);
     const STATUS_WIDTH: usize = 6;
@@ -110,7 +157,7 @@ fn tickets_table_with_width(
 
     for t in tickets {
         let marker = if Some(&t.id) == current { "*" } else { " " };
-        let assigned = t.assigned_short().unwrap_or_default();
+        let assigned = display_assigned_short(t.assigned.as_deref(), nicks);
         let tags = t.tags.iter().cloned().collect::<Vec<_>>().join(",");
         out.push_str(marker);
         out.push(' ');
@@ -148,8 +195,8 @@ fn tickets_table_with_width(
     out
 }
 
-/// Render a single ticket and its comments.
-pub fn ticket_detail(t: &Ticket) -> String {
+/// Render a single ticket and its comments, resolving emails to nicks.
+pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>) -> String {
     let mut out = String::new();
     let title_bar = "-".repeat(t.title.chars().count().max(20));
     out.push_str(&ansi(ANSI_DIM, &title_bar));
@@ -164,7 +211,7 @@ pub fn ticket_detail(t: &Ticket) -> String {
                 "{} ({})  by {}",
                 friendly_date(t.created_at),
                 relative_date(t.created_at, OffsetDateTime::now_utc()),
-                t.created_by
+                display_name(&t.created_by, nicks)
             ),
         ),
     ));
@@ -177,7 +224,7 @@ pub fn ticket_detail(t: &Ticket) -> String {
         &ansi(state_color(t.state.as_str()), t.state.as_str()),
     ));
     if let Some(a) = &t.assigned {
-        out.push_str(&detail_field("Assigned", a));
+        out.push_str(&detail_field("Assigned", &display_name(a, nicks)));
     }
     if let Some(p) = t.priority {
         out.push_str(&detail_field("Priority", &p.to_string()));
@@ -270,7 +317,7 @@ pub fn ticket_detail(t: &Ticket) -> String {
         for c in &t.comments {
             out.push_str(&format!(
                 "\n{} {} {}\n  {}\n",
-                ansi(ANSI_CYAN, &c.author),
+                ansi(ANSI_CYAN, &display_name(&c.author, nicks)),
                 ansi(ANSI_DIM, "-"),
                 ansi(ANSI_DIM, &c.at.format(&Rfc3339).unwrap_or_default()),
                 c.body.replace('\n', "\n  "),

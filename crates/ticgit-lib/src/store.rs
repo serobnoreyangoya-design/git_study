@@ -105,8 +105,9 @@ impl TicketStore {
 
         if let Some(ref a) = opts.assigned {
             if !a.is_empty() {
-                validate_email(a)?;
-                p.set(&keys::ticket_field(&id, "assigned"), a.as_str())?;
+                let resolved = self.resolve_user(a)?;
+                validate_email(&resolved)?;
+                p.set(&keys::ticket_field(&id, "assigned"), resolved.as_str())?;
             }
         }
 
@@ -270,8 +271,9 @@ impl TicketStore {
         let key = keys::ticket_field(id, "assigned");
         match who {
             Some(w) if !w.is_empty() => {
-                validate_email(w)?;
-                p.set(&key, w)?;
+                let resolved = self.resolve_user(w)?;
+                validate_email(&resolved)?;
+                p.set(&key, resolved.as_str())?;
             }
             _ => {
                 p.remove(&key)?;
@@ -598,6 +600,86 @@ impl TicketStore {
             Some(MetaValue::Set(members)) => Ok(members),
             _ => Ok(BTreeSet::new()),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // User nick → email map (shared mailmap)
+    // -------------------------------------------------------------------
+
+    /// List all user nicks and their email sets.
+    pub fn list_users(&self) -> Result<BTreeMap<String, BTreeSet<String>>> {
+        let p = self.project_handle();
+        let pairs = p.get_all_values(Some(&keys::users_prefix()))?;
+        let mut users = BTreeMap::new();
+        for (key, value) in pairs {
+            if let Some(nick) = keys::parse_user_nick(&key) {
+                if let MetaValue::Set(emails) = value {
+                    users.insert(nick.to_string(), emails);
+                }
+            }
+        }
+        Ok(users)
+    }
+
+    /// Get the email set for a nick.
+    pub fn get_user(&self, nick: &str) -> Result<BTreeSet<String>> {
+        let p = self.project_handle();
+        match p.get_value(&keys::user_key(nick))? {
+            Some(MetaValue::Set(emails)) => Ok(emails),
+            _ => Ok(BTreeSet::new()),
+        }
+    }
+
+    /// Add an email to a nick's set.
+    pub fn add_user_email(&self, nick: &str, email: &str) -> Result<()> {
+        validate_email(email)?;
+        self.project_handle()
+            .set_add(&keys::user_key(nick), email)?;
+        Ok(())
+    }
+
+    /// Remove an email from a nick's set. If the set becomes empty, remove the key.
+    pub fn remove_user_email(&self, nick: &str, email: &str) -> Result<()> {
+        let p = self.project_handle();
+        p.set_remove(&keys::user_key(nick), email)?;
+        // Check if empty and clean up.
+        if let Ok(emails) = self.get_user(nick) {
+            if emails.is_empty() {
+                p.remove(&keys::user_key(nick))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove a user nick entirely (all emails).
+    pub fn remove_user(&self, nick: &str) -> Result<()> {
+        self.project_handle().remove(&keys::user_key(nick))?;
+        Ok(())
+    }
+
+    /// Resolve a nick or email to an email address.
+    /// If `input` contains `@`, treat it as an email and return as-is.
+    /// Otherwise, look up as a nick and return the first email.
+    pub fn resolve_user(&self, input: &str) -> Result<String> {
+        if input.contains('@') {
+            return Ok(input.to_string());
+        }
+        let emails = self.get_user(input)?;
+        emails
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::InvalidValue(format!("unknown user nick `{input}`")))
+    }
+
+    /// Reverse-lookup: given an email, find the nick (if any).
+    pub fn nick_for_email(&self, email: &str) -> Result<Option<String>> {
+        let users = self.list_users()?;
+        for (nick, emails) in &users {
+            if emails.contains(email) {
+                return Ok(Some(nick.clone()));
+            }
+        }
+        Ok(None)
     }
 
     pub fn schema_version(&self) -> Result<Option<String>> {

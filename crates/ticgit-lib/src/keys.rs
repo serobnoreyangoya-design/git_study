@@ -70,6 +70,26 @@ pub fn view(name: &str) -> String {
     format!("{NS}:views:{name}")
 }
 
+/// Prefix for user-map keys; used to enumerate all users.
+#[must_use]
+pub fn users_prefix() -> String {
+    format!("{NS}:users")
+}
+
+/// A single user key, e.g. `ticgit:users:scott`.
+#[must_use]
+pub fn user_key(nick: &str) -> String {
+    format!("{NS}:users:{nick}")
+}
+
+/// If `key` is a user key, returns the nick.
+#[must_use]
+pub fn parse_user_nick(key: &str) -> Option<&str> {
+    let prefix = format!("{NS}:users:");
+    let name = key.strip_prefix(&prefix)?;
+    if name.is_empty() { None } else { Some(name) }
+}
+
 /// If `key` is a per-ticket field key, returns `(ticket_uuid, field_name)`.
 /// Returns `None` for system keys, view keys, or anything malformed.
 #[must_use]
