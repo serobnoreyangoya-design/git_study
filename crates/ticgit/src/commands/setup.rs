@@ -25,7 +25,16 @@ pub fn auto_setup_if_needed() -> Result<bool> {
     if has_meta_remote()? {
         return Ok(false);
     }
-    run_setup()
+    let url = read_git_meta_url()?;
+    if url.is_none() {
+        return Ok(false);
+    }
+    eprintln!("Setting up ticgit (fetching ticket metadata)...");
+    let result = run_setup()?;
+    if result {
+        eprintln!("Done. Ticket metadata is ready.");
+    }
+    Ok(result)
 }
 
 fn run_setup() -> Result<bool> {
