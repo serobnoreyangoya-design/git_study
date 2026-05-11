@@ -804,7 +804,7 @@ impl App {
                 comment: None,
                 tags: split_tags(&self.new_ticket.tags),
                 assigned: optional_trimmed(&self.new_ticket.assigned).map(ToString::to_string),
-                parent: None,
+                ..Default::default()
             },
         )?;
         let id = ticket.id;

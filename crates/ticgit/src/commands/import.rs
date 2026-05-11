@@ -97,7 +97,7 @@ fn run_gh(args: GhArgs) -> Result<()> {
             comment: None,
             tags: issue_tags(&issue),
             assigned: primary_assignee(&issue),
-            parent: None,
+            ..Default::default()
         };
         let ticket = store.create(&issue.title, opts)?;
         store.set_description(&ticket.id, Some(&issue_description(&issue)))?;
@@ -304,11 +304,16 @@ fn run_linear(args: LinearArgs) -> Result<()> {
             continue;
         }
 
+        let created_at = issue
+            .created_at
+            .as_deref()
+            .and_then(|s| time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok());
         let opts = NewTicketOpts {
             comment: None,
             tags: linear_issue_tags(&issue),
             assigned: linear_assignee(&issue),
             parent: None,
+            created_at,
         };
         let ticket = store.create(&issue.title, opts)?;
         store.set_description(&ticket.id, Some(&linear_description(&issue)))?;
@@ -425,8 +430,9 @@ query($teamKey: String!, $first: Int!, $after: String) {
       description
       url
       priority
+      createdAt
       state { name }
-      assignee { email name }
+      assignee { email }
       labels { nodes { name } }
       project { name }
     }
@@ -562,12 +568,14 @@ fn linear_description(issue: &LinearIssue) -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct LinearIssue {
     identifier: String,
     title: String,
     description: Option<String>,
     url: String,
     priority: Option<i32>,
+    created_at: Option<String>,
     state: Option<LinearState>,
     assignee: Option<LinearAssignee>,
     labels: Option<LinearLabels>,
@@ -697,12 +705,12 @@ mod tests {
             description: Some("Users can't log in after token expiry".to_string()),
             url: "https://linear.app/team/issue/ENG-123".to_string(),
             priority: Some(2),
+            created_at: Some("2025-03-15T10:30:00.000Z".to_string()),
             state: Some(LinearState {
                 name: "In Progress".to_string(),
             }),
             assignee: Some(LinearAssignee {
                 email: "alice@example.com".to_string(),
-                name: "Alice".to_string(),
             }),
             labels: Some(LinearLabels {
                 nodes: vec![LinearLabel {
@@ -748,7 +756,6 @@ mod tests {
         let mut issue = linear_issue();
         issue.assignee = Some(LinearAssignee {
             email: String::new(),
-            name: "Bob".to_string(),
         });
         assert_eq!(linear_assignee(&issue), None);
     }

@@ -297,6 +297,8 @@ pub struct NewTicketOpts {
     pub tags: Vec<String>,
     pub assigned: Option<String>,
     pub parent: Option<Uuid>,
+    /// Override the created-at timestamp (e.g. when importing from external systems).
+    pub created_at: Option<time::OffsetDateTime>,
 }
 
 #[cfg(test)]

@@ -87,7 +87,7 @@ impl TicketStore {
     pub fn create(&self, title: &str, opts: NewTicketOpts) -> Result<Ticket> {
         let id = Uuid::new_v4();
         let p = self.session.target(&Target::project());
-        let now = OffsetDateTime::now_utc();
+        let now = opts.created_at.unwrap_or_else(OffsetDateTime::now_utc);
         let now_rfc = now
             .format(&Rfc3339)
             .map_err(|e| Error::Time(e.to_string()))?;
@@ -866,7 +866,7 @@ mod tests {
             comment: Some("first comment".into()),
             tags: vec!["bug".into(), "ui".into()],
             assigned: Some("scott@example.com".into()),
-            parent: None,
+            ..Default::default()
         };
         let created = store.create("My new ticket", opts).unwrap();
         assert_eq!(created.title, "My new ticket");

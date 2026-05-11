@@ -91,6 +91,7 @@ pub fn run(args: Args) -> Result<()> {
         tags,
         assigned: args.assigned,
         parent,
+        ..Default::default()
     };
     let mut ticket = store.create(&title, opts)?;
     let mut needs_reload = false;
