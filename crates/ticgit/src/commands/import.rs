@@ -54,9 +54,9 @@ pub struct GhArgs {
 
 #[derive(Debug, Parser)]
 pub struct LinearArgs {
-    /// Linear team key (e.g. "ENG").
+    /// Linear team key (e.g. "ENG"). If omitted, lists available teams.
     #[arg(short = 't', long = "team")]
-    pub team: String,
+    pub team: Option<String>,
 
     /// Maximum number of issues to import.
     #[arg(long = "limit", default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
@@ -249,17 +249,49 @@ fn issue_description(issue: &GhIssue) -> String {
 
 // ── Linear import ──────────────────────────────────────────────────
 
-fn run_linear(args: LinearArgs) -> Result<()> {
-    let api_key = std::env::var("LINEAR_API_KEY").map_err(|_| {
+fn get_linear_api_key() -> Result<String> {
+    std::env::var("LINEAR_API_KEY").map_err(|_| {
         anyhow::anyhow!(
-            "LINEAR_API_KEY environment variable not set.\n\
-             Create a personal API key at https://linear.app/settings/api\n\
-             then export LINEAR_API_KEY=lin_api_..."
+            "LINEAR_API_KEY environment variable not set.\n\n\
+             To get your API key:\n\
+             1. Go to https://linear.app/settings/api\n\
+             2. Click \"Create key\" under \"Personal API keys\"\n\
+             3. Export it in your shell:\n\n\
+             \x1b[1m  export LINEAR_API_KEY=lin_api_...\x1b[0m\n\n\
+             Then run this command again."
         )
-    })?;
+    })
+}
+
+fn run_linear(args: LinearArgs) -> Result<()> {
+    let api_key = get_linear_api_key()?;
+
+    let team = match args.team {
+        Some(t) => t,
+        None => {
+            // No --team given: list available teams.
+            let teams = fetch_linear_teams(&api_key)?;
+            if teams.is_empty() {
+                println!("No teams found in your Linear workspace.");
+                return Ok(());
+            }
+            println!("Available Linear teams:\n");
+            for team in &teams {
+                println!(
+                    "  \x1b[1m\x1b[36m{}\x1b[0m  {}  \x1b[2m({} open issue{})\x1b[0m",
+                    team.key,
+                    team.name,
+                    team.issue_count,
+                    if team.issue_count == 1 { "" } else { "s" },
+                );
+            }
+            println!("\nUsage: ti import linear --team <KEY>");
+            return Ok(());
+        }
+    };
 
     let store = open_store()?;
-    let issues = fetch_linear_issues(&api_key, &args.team, args.limit)?;
+    let issues = fetch_linear_issues(&api_key, &team, args.limit)?;
     let seen = existing_linear_identifiers(&store)?;
 
     let mut imported = 0usize;
@@ -320,6 +352,59 @@ fn run_linear(args: LinearArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+const LINEAR_TEAMS_QUERY: &str = r#"
+query {
+  teams(orderBy: updatedAt) {
+    nodes {
+      key
+      name
+      issueCount
+    }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LinearTeam {
+    key: String,
+    name: String,
+    issue_count: u32,
+}
+
+fn fetch_linear_teams(api_key: &str) -> Result<Vec<LinearTeam>> {
+    let body = serde_json::json!({
+        "query": LINEAR_TEAMS_QUERY,
+    });
+
+    let response: serde_json::Value = ureq::post(LINEAR_API_URL)
+        .header("Authorization", api_key)
+        .send_json(&body)
+        .context("calling Linear GraphQL API")?
+        .body_mut()
+        .read_json()
+        .context("parsing Linear API response")?;
+
+    if let Some(errors) = response.get("errors") {
+        let msg = errors
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        anyhow::bail!("Linear API error: {msg}");
+    }
+
+    let nodes = response
+        .get("data")
+        .and_then(|d| d.get("teams"))
+        .and_then(|t| t.get("nodes"))
+        .cloned()
+        .unwrap_or_default();
+
+    serde_json::from_value(nodes).context("parsing Linear teams")
 }
 
 const LINEAR_QUERY: &str = r#"
