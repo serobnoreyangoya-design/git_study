@@ -16,6 +16,20 @@ use crate::error::{Error, Result};
 use crate::keys;
 use crate::ticket::{Comment, CommentBody, NewTicketOpts, Ticket, TicketState, TicketStatus};
 
+/// Basic email format check: must contain exactly one `@` with non-empty
+/// local and domain parts.
+fn validate_email(email: &str) -> Result<()> {
+    let email = email.trim();
+    let parts: Vec<&str> = email.split('@').collect();
+    if parts.len() == 2 && !parts[0].is_empty() && parts[1].contains('.') && !parts[1].starts_with('.') && !parts[1].ends_with('.') {
+        Ok(())
+    } else {
+        Err(Error::InvalidValue(format!(
+            "`{email}` is not a valid email address (expected user@domain)"
+        )))
+    }
+}
+
 /// Wraps a [`Session`] and exposes a ticket-shaped API on top of it.
 pub struct TicketStore {
     session: Session,
@@ -91,6 +105,7 @@ impl TicketStore {
 
         if let Some(ref a) = opts.assigned {
             if !a.is_empty() {
+                validate_email(a)?;
                 p.set(&keys::ticket_field(&id, "assigned"), a.as_str())?;
             }
         }
@@ -255,6 +270,7 @@ impl TicketStore {
         let key = keys::ticket_field(id, "assigned");
         match who {
             Some(w) if !w.is_empty() => {
+                validate_email(w)?;
                 p.set(&key, w)?;
             }
             _ => {
@@ -499,8 +515,10 @@ impl TicketStore {
         id: &Uuid,
         body: &str,
     ) -> Result<()> {
+        let email = self.session.email().to_string();
+        validate_email(&email)?;
         let payload = CommentBody {
-            author: self.session.email().to_string(),
+            author: email,
             body: body.to_string(),
         };
         let json = serde_json::to_string(&payload)?;
@@ -562,6 +580,7 @@ impl TicketStore {
     // -------------------------------------------------------------------
 
     pub fn add_owner(&self, who: &str) -> Result<()> {
+        validate_email(who)?;
         self.project_handle()
             .set_add(&keys::system_key("owners"), who.trim())?;
         Ok(())

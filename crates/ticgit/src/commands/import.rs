@@ -208,7 +208,15 @@ fn primary_assignee(issue: &GhIssue) -> Option<String> {
     issue
         .assignees
         .iter()
-        .find_map(|assignee| non_empty(&assignee.login).map(ToString::to_string))
+        .find_map(|assignee| {
+            non_empty(&assignee.login).map(|login| {
+                if login.contains('@') {
+                    login.to_string()
+                } else {
+                    format!("{login}@users.noreply.github.com")
+                }
+            })
+        })
 }
 
 fn issue_description(issue: &GhIssue) -> String {
@@ -446,7 +454,7 @@ fn linear_issue_tags(issue: &LinearIssue) -> Vec<String> {
 fn linear_assignee(issue: &LinearIssue) -> Option<String> {
     issue.assignee.as_ref().and_then(|a| {
         non_empty(&a.email)
-            .or_else(|| non_empty(&a.name))
+            .filter(|e| e.contains('@'))
             .map(ToString::to_string)
     })
 }
@@ -652,12 +660,12 @@ mod tests {
     }
 
     #[test]
-    fn linear_assignee_falls_back_to_name() {
+    fn linear_assignee_skips_non_email() {
         let mut issue = linear_issue();
         issue.assignee = Some(LinearAssignee {
             email: String::new(),
             name: "Bob".to_string(),
         });
-        assert_eq!(linear_assignee(&issue), Some("Bob".to_string()));
+        assert_eq!(linear_assignee(&issue), None);
     }
 }

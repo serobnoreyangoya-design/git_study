@@ -656,14 +656,14 @@ fn ticket_mutations_support_json_output() {
 
     let output = repo
         .ti()
-        .args(["assign", "-t", &id, "octocat", "--json"])
+        .args(["assign", "-t", &id, "octocat@github.com", "--json"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["assigned"], "octocat");
+    assert_eq!(json["assigned"], "octocat@github.com");
 
     let output = repo
         .ti()
@@ -1115,7 +1115,7 @@ JSON
         .iter()
         .find(|ticket| ticket["title"] == "first gh issue")
         .unwrap();
-    assert_eq!(first["assigned"], "octocat");
+    assert_eq!(first["assigned"], "octocat@users.noreply.github.com");
     assert_eq!(first["milestone"], "v1");
     assert_eq!(
         first["description"],
