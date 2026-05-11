@@ -26,7 +26,6 @@ const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[97m";
 const BG_GREEN: &str = "\x1b[42m";
 const BG_CYAN: &str = "\x1b[46m";
-const _BG_YELLOW: &str = "\x1b[43m";
 const BG_MAGENTA: &str = "\x1b[45m";
 
 pub fn run(args: Args) -> Result<()> {
@@ -55,10 +54,19 @@ pub fn run(args: Args) -> Result<()> {
     let mut tags: BTreeMap<String, usize> = BTreeMap::new();
     let mut assignees: BTreeMap<String, usize> = BTreeMap::new();
 
+    // Collect recently closed tickets (by created_at as proxy for activity).
+    let mut recently_closed: Vec<(String, String)> = Vec::new(); // (short_id, title)
+
     for t in &tickets {
         match t.status {
             ticgit_lib::TicketStatus::Open => open += 1,
-            ticgit_lib::TicketStatus::Closed => closed += 1,
+            ticgit_lib::TicketStatus::Closed => {
+                closed += 1;
+                recently_closed.push((
+                    t.id.to_string().chars().take(6).collect(),
+                    t.title.clone(),
+                ));
+            }
         }
         *states.entry(t.state.as_str().to_string()).or_default() += 1;
 
@@ -136,21 +144,39 @@ pub fn run(args: Args) -> Result<()> {
     let mut assignee_vec: Vec<_> = assignees.into_iter().collect();
     assignee_vec.sort_by(|a, b| b.1.cmp(&a.1));
 
-    // Limit tags/assignees to fit terminal height.
-    // Reserve lines: header(3) + overview(3) + spacing(3) + footer(1) = 10 baseline.
-    let avail_lines = term_height.saturating_sub(10);
-    let max_section_rows = if two_col {
-        avail_lines.max(4)
-    } else {
-        // Single column: sections are stacked. Budget lines across sections.
-        let sections = 1 + (!tag_vec.is_empty() as usize)
-            + (!assignee_vec.is_empty() as usize)
-            + ((created_7d > 0 || closed_7d > 0) as usize);
-        if sections > 0 { avail_lines / sections } else { avail_lines }
-    }.max(3);
+    // Budget vertical space conservatively.
+    // Fixed overhead: blank + divider + title + divider + blank + overview + blank + divider = 8
+    // Plus 2 lines buffer for shell prompt.
+    let overhead = 10;
+    let avail = term_height.saturating_sub(overhead);
 
-    let tag_limit = max_section_rows.min(tag_vec.len());
-    let assignee_limit = max_section_rows.min(assignee_vec.len());
+    // In two-col mode, left and right share vertical space.
+    // Left: states + recent activity. Right: tags + assignees + recently closed.
+    // Tag limit: leave room for section headers, assignees, recently closed.
+    let tag_limit = if two_col {
+        // Right column budget: tags header(1) + tags + gap(1) + assignees header(1) + assignees + gap(1) + closed header(1) + closed
+        let right_fixed = 2 + assignee_vec.len().min(3) + 1;
+        let closed_budget = 4; // header + up to 3 titles
+        avail.saturating_sub(right_fixed + closed_budget).min(tag_vec.len()).min(6)
+    } else {
+        avail.saturating_sub(state_vec.len() + 8).min(tag_vec.len()).min(5)
+    };
+
+    let assignee_limit = assignee_vec.len().min(3);
+
+    // Recently closed: show if there's vertical room.
+    let recently_closed_limit = if two_col {
+        let left_rows = state_vec.len() + 1
+            + if created_7d > 0 || closed_7d > 0 { 4 } else { 0 };
+        let right_rows = 1 + tag_limit
+            + (if tag_vec.len() > tag_limit { 1 } else { 0 })
+            + 1
+            + if !assignee_vec.is_empty() { 1 + assignee_limit + 1 } else { 0 };
+        let used = left_rows.max(right_rows);
+        avail.saturating_sub(used + 1).min(recently_closed.len()).min(5)
+    } else {
+        avail.saturating_sub(state_vec.len() + tag_limit + 10).min(recently_closed.len()).min(3)
+    };
 
     // ── Build output ──
 
@@ -176,15 +202,13 @@ pub fn run(args: Args) -> Result<()> {
 
     if two_col {
         // ── Two-column layout ──
-        let col_width = (width - 4) / 2; // 2 padding on each side
+        let col_width = (width - 4) / 2;
         let bar_width = col_width.saturating_sub(22);
 
-        // Left column: States + Recent Activity
-        // Right column: Tags + Assignees
         let mut left_lines: Vec<String> = Vec::new();
         let mut right_lines: Vec<String> = Vec::new();
 
-        // States
+        // Left: States
         if !state_vec.is_empty() {
             left_lines.push(format!("{CYAN}{BOLD}  States{RESET}"));
             let max_count = state_vec.iter().map(|(_, c)| *c).max().unwrap_or(1);
@@ -199,7 +223,7 @@ pub fn run(args: Args) -> Result<()> {
             left_lines.push(String::new());
         }
 
-        // Recent activity
+        // Left: Recent activity
         if created_7d > 0 || closed_7d > 0 {
             left_lines.push(format!("{YELLOW}{BOLD}  Recent (7d){RESET}"));
             if created_7d > 0 {
@@ -215,7 +239,21 @@ pub fn run(args: Args) -> Result<()> {
             left_lines.push(String::new());
         }
 
-        // Tags
+        // Left: Assignees
+        if !assignee_vec.is_empty() {
+            left_lines.push(format!("{GREEN}{BOLD}  Assignees{RESET}"));
+            let max_a = assignee_vec.first().map(|(_, c)| *c).unwrap_or(1);
+            for (name, count) in assignee_vec.iter().take(assignee_limit) {
+                let bar = colored_bar(*count, max_a, bar_width, BG_GREEN);
+                left_lines.push(format!(
+                    "    {GREEN}{:<12}{RESET} {:>3}  {bar}",
+                    name, count
+                ));
+            }
+            left_lines.push(String::new());
+        }
+
+        // Right: Tags
         if !tag_vec.is_empty() {
             right_lines.push(format!("{MAGENTA}{BOLD}  Tags{RESET}"));
             let max_count = tag_vec.first().map(|(_, c)| *c).unwrap_or(1);
@@ -233,15 +271,23 @@ pub fn run(args: Args) -> Result<()> {
             right_lines.push(String::new());
         }
 
-        // Assignees
-        if !assignee_vec.is_empty() {
-            right_lines.push(format!("{GREEN}{BOLD}  Assignees{RESET}"));
-            for (name, count) in assignee_vec.iter().take(assignee_limit) {
-                let bar = colored_bar(*count, state_vec.iter().map(|(_, c)| *c).max().unwrap_or(1).max(*count), bar_width, BG_GREEN);
+        // Right: Recently Closed
+        if recently_closed_limit > 0 {
+            right_lines.push(format!("{RED}{BOLD}  Recently Closed{RESET}"));
+            for (id, title) in recently_closed.iter().take(recently_closed_limit) {
+                let max_title = col_width.saturating_sub(12);
+                let display_title = if title.len() > max_title {
+                    format!("{}...", &title[..max_title.saturating_sub(3)])
+                } else {
+                    title.clone()
+                };
                 right_lines.push(format!(
-                    "    {GREEN}{:<12}{RESET} {:>3}  {bar}",
-                    name, count
+                    "    {DIM}{id}{RESET} {display_title}"
                 ));
+            }
+            let remaining = recently_closed.len().saturating_sub(recently_closed_limit);
+            if remaining > 0 {
+                right_lines.push(format!("    {DIM}... and {remaining} more{RESET}"));
             }
             right_lines.push(String::new());
         }
@@ -259,7 +305,6 @@ pub fn run(args: Args) -> Result<()> {
         // ── Single-column layout ──
         let bar_width = width.saturating_sub(24);
 
-        // States
         if !state_vec.is_empty() {
             println!("  {CYAN}{BOLD}States{RESET}");
             let max_count = state_vec.iter().map(|(_, c)| *c).max().unwrap_or(1);
@@ -274,7 +319,6 @@ pub fn run(args: Args) -> Result<()> {
             println!();
         }
 
-        // Tags
         if !tag_vec.is_empty() {
             println!("  {MAGENTA}{BOLD}Top Tags{RESET}");
             let max_count = tag_vec.first().map(|(_, c)| *c).unwrap_or(1);
@@ -292,30 +336,35 @@ pub fn run(args: Args) -> Result<()> {
             println!();
         }
 
-        // Recent activity
         if created_7d > 0 || closed_7d > 0 {
             println!("  {YELLOW}{BOLD}Recent Activity (7d){RESET}");
             if created_7d > 0 {
-                println!(
-                    "    {GREEN}+{created_7d}{RESET}{DIM} created{RESET}"
-                );
+                println!("    {GREEN}+{created_7d}{RESET}{DIM} created{RESET}");
             }
             if closed_7d > 0 {
-                println!(
-                    "    {RED}-{closed_7d}{RESET}{DIM} closed{RESET}"
-                );
+                println!("    {RED}-{closed_7d}{RESET}{DIM} closed{RESET}");
             }
             println!();
         }
 
-        // Assignees
         if !assignee_vec.is_empty() {
             println!("  {GREEN}{BOLD}Assignees{RESET}");
             for (name, count) in assignee_vec.iter().take(assignee_limit) {
-                println!(
-                    "    {GREEN}{:<14}{RESET}{:>3}",
-                    name, count
-                );
+                println!("    {GREEN}{:<14}{RESET}{:>3}", name, count);
+            }
+            println!();
+        }
+
+        if recently_closed_limit > 0 {
+            println!("  {RED}{BOLD}Recently Closed{RESET}");
+            for (id, title) in recently_closed.iter().take(recently_closed_limit) {
+                let max_title = width.saturating_sub(12);
+                let display_title = if title.len() > max_title {
+                    format!("{}...", &title[..max_title.saturating_sub(3)])
+                } else {
+                    title.clone()
+                };
+                println!("    {DIM}{id}{RESET} {display_title}");
             }
             println!();
         }
