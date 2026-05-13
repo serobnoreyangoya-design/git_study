@@ -127,31 +127,44 @@ fn tickets_table_with_width(
     const STATUS_WIDTH: usize = 6;
     const STATE_WIDTH: usize = 11;
     const DATE_WIDTH: usize = 5;
+    const PRIORITY_WIDTH: usize = 4;
     const ASSIGNED_WIDTH: usize = 8;
     const TAGS_WIDTH: usize = 20;
-    const GAPS_AND_MARKER: usize = 15;
     const MIN_TITLE_WIDTH: usize = 12;
 
-    let fixed_width = id_width
-        + STATUS_WIDTH
-        + STATE_WIDTH
-        + DATE_WIDTH
-        + ASSIGNED_WIDTH
-        + TAGS_WIDTH
-        + GAPS_AND_MARKER;
-    let title_width = width.saturating_sub(fixed_width).max(MIN_TITLE_WIDTH);
+    let layout = TableLayout::new(
+        width,
+        id_width,
+        DATE_WIDTH,
+        STATUS_WIDTH,
+        STATE_WIDTH,
+        PRIORITY_WIDTH,
+        ASSIGNED_WIDTH,
+        TAGS_WIDTH,
+        MIN_TITLE_WIDTH,
+    );
 
     let mut out = String::new();
-    let header = format!(
-        "  {} {}  {} {} {} {} {}",
+    let mut header = format!(
+        "  {} {}  {} {} {}",
         fit("TicId", id_width),
         fit("Date", DATE_WIDTH),
-        fit("Title", title_width),
+        fit("Title", layout.title_width),
         fit("Status", STATUS_WIDTH),
-        fit("State", STATE_WIDTH),
-        fit("Assgn", ASSIGNED_WIDTH),
-        fit("Tags", TAGS_WIDTH)
+        fit("State", STATE_WIDTH)
     );
+    if layout.show_priority {
+        header.push(' ');
+        header.push_str(&fit("Pri", PRIORITY_WIDTH));
+    }
+    if layout.show_assigned {
+        header.push(' ');
+        header.push_str(&fit("Assgn", ASSIGNED_WIDTH));
+    }
+    if layout.show_tags {
+        header.push(' ');
+        header.push_str(&fit("Tags", TAGS_WIDTH));
+    }
     out.push_str(&ansi(ANSI_DIM, &header));
     out.push('\n');
     out.push_str(&ansi(ANSI_DIM, &"-".repeat(width)));
@@ -171,10 +184,13 @@ fn tickets_table_with_width(
         ));
         out.push_str("  ");
         if t.children.is_empty() {
-            out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), title_width)));
+            out.push_str(&ansi(
+                ANSI_BLUE,
+                &fit(&flatten(&t.title), layout.title_width),
+            ));
         } else {
             let suffix = format!(" [+{}]", t.children.len());
-            let avail = title_width.saturating_sub(suffix.len());
+            let avail = layout.title_width.saturating_sub(suffix.len());
             out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&t.title), avail)));
             out.push_str(&ansi(ANSI_DIM, &fit(&suffix, suffix.len())));
         }
@@ -188,13 +204,113 @@ fn tickets_table_with_width(
             state_color(t.state.as_str()),
             &fit(t.state.as_str(), STATE_WIDTH),
         ));
-        out.push_str(&fit(&flatten(&assigned), ASSIGNED_WIDTH));
-        out.push(' ');
-        out.push_str(&ansi(ANSI_YELLOW, &fit(&flatten(&tags), TAGS_WIDTH)));
+        if layout.show_priority {
+            out.push(' ');
+            let priority = t
+                .priority
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            out.push_str(&ansi(ANSI_PURPLE, &fit(&priority, PRIORITY_WIDTH)));
+        }
+        if layout.show_assigned {
+            out.push_str(&fit(&flatten(&assigned), ASSIGNED_WIDTH));
+        }
+        if layout.show_tags {
+            out.push(' ');
+            out.push_str(&ansi(ANSI_YELLOW, &fit(&flatten(&tags), TAGS_WIDTH)));
+        }
         out.push('\n');
     }
 
     out
+}
+
+struct TableLayout {
+    title_width: usize,
+    show_priority: bool,
+    show_assigned: bool,
+    show_tags: bool,
+}
+
+impl TableLayout {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        width: usize,
+        id_width: usize,
+        date_width: usize,
+        status_width: usize,
+        state_width: usize,
+        priority_width: usize,
+        assigned_width: usize,
+        tags_width: usize,
+        min_title_width: usize,
+    ) -> Self {
+        let mut layout = Self {
+            title_width: min_title_width,
+            show_priority: true,
+            show_assigned: true,
+            show_tags: true,
+        };
+
+        while layout.fixed_width_without_title(
+            id_width,
+            date_width,
+            status_width,
+            state_width,
+            priority_width,
+            assigned_width,
+            tags_width,
+        ) + min_title_width
+            > width
+        {
+            if layout.show_tags {
+                layout.show_tags = false;
+            } else if layout.show_assigned {
+                layout.show_assigned = false;
+            } else if layout.show_priority {
+                layout.show_priority = false;
+            } else {
+                break;
+            }
+        }
+
+        let fixed = layout.fixed_width_without_title(
+            id_width,
+            date_width,
+            status_width,
+            state_width,
+            priority_width,
+            assigned_width,
+            tags_width,
+        );
+        layout.title_width = width.saturating_sub(fixed).max(min_title_width);
+        layout
+    }
+
+    fn fixed_width_without_title(
+        &self,
+        id_width: usize,
+        date_width: usize,
+        status_width: usize,
+        state_width: usize,
+        priority_width: usize,
+        assigned_width: usize,
+        tags_width: usize,
+    ) -> usize {
+        let marker_and_required_spacing = 1 + 1 + 1 + 2 + 1 + 1;
+        let mut width =
+            marker_and_required_spacing + id_width + date_width + status_width + state_width;
+        if self.show_priority {
+            width += 1 + priority_width;
+        }
+        if self.show_assigned {
+            width += assigned_width;
+        }
+        if self.show_tags {
+            width += 1 + tags_width;
+        }
+        width
+    }
 }
 
 /// Render a single ticket and its comments, resolving emails to nicks.
@@ -866,6 +982,70 @@ mod tests {
         assert_eq!(refs.get(&open.id), Some(&3));
     }
 
+    #[test]
+    fn tickets_table_shows_priority_when_width_allows() {
+        let mut ticket = ticket(
+            "d7f2d8f6-d6ec-3da1-a180-0a33fb090d59",
+            "priority ticket",
+            TicketState::New,
+        );
+        ticket.priority = Some(2);
+        ticket.assigned = Some("tester@example.com".to_string());
+        ticket.tags.insert("feature".to_string());
+        let refs = open_ticket_ref_lengths(&[ticket.clone()]);
+
+        let table = strip_ansi(&tickets_table_with_width(
+            &[ticket],
+            None,
+            &refs,
+            100,
+            OffsetDateTime::UNIX_EPOCH,
+            None,
+        ));
+
+        assert!(table.contains("Pri"));
+        assert!(table.contains(" 2   "));
+        assert!(table.contains("Assgn"));
+        assert!(table.contains("Tags"));
+    }
+
+    #[test]
+    fn tickets_table_drops_optional_columns_as_width_shrinks() {
+        let mut ticket = ticket(
+            "d7f2d8f6-d6ec-3da1-a180-0a33fb090d59",
+            "priority ticket",
+            TicketState::New,
+        );
+        ticket.priority = Some(2);
+        ticket.assigned = Some("tester@example.com".to_string());
+        ticket.tags.insert("feature".to_string());
+        let refs = open_ticket_ref_lengths(&[ticket.clone()]);
+
+        let medium = strip_ansi(&tickets_table_with_width(
+            &[ticket.clone()],
+            None,
+            &refs,
+            55,
+            OffsetDateTime::UNIX_EPOCH,
+            None,
+        ));
+        assert!(medium.contains("Pri"));
+        assert!(!medium.contains("Assgn"));
+        assert!(!medium.contains("Tags"));
+
+        let narrow = strip_ansi(&tickets_table_with_width(
+            &[ticket],
+            None,
+            &refs,
+            50,
+            OffsetDateTime::UNIX_EPOCH,
+            None,
+        ));
+        assert!(!narrow.contains("Pri"));
+        assert!(!narrow.contains("Assgn"));
+        assert!(!narrow.contains("Tags"));
+    }
+
     fn ticket(id: &str, title: &str, state: TicketState) -> Ticket {
         Ticket {
             id: Uuid::parse_str(id).unwrap(),
@@ -890,5 +1070,22 @@ mod tests {
             created_at: OffsetDateTime::UNIX_EPOCH,
             created_by: "tester@example.com".to_string(),
         }
+    }
+
+    fn strip_ansi(input: &str) -> String {
+        let mut stripped = String::new();
+        let mut chars = input.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                for ch in chars.by_ref() {
+                    if ch == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                stripped.push(ch);
+            }
+        }
+        stripped
     }
 }
