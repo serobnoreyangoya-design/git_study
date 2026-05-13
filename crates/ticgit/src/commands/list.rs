@@ -6,7 +6,7 @@ use crate::commands::{open_store, SessionGitDir};
 use crate::render;
 use crate::session_state::{SavedView, State};
 
-#[derive(Debug, Default, Parser)]
+#[derive(Debug, Parser)]
 pub struct Args {
     /// Load a saved view by name.
     pub view: Option<String>,
@@ -62,6 +62,27 @@ pub struct Args {
     /// Output as Markdown.
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            view: None,
+            state: None,
+            status: None,
+            all: false,
+            tag: Vec::new(),
+            tag_mode: "all".to_string(),
+            assigned: None,
+            only_tagged: false,
+            search: None,
+            order: None,
+            subissues: false,
+            limit: 20,
+            json: false,
+            markdown: false,
+        }
+    }
 }
 
 pub fn run(args: Args) -> Result<()> {

@@ -9,6 +9,8 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::timefmt::relative_time;
+
 /// Mapping of email → nick for display purposes.
 pub type NickMap = HashMap<String, String>;
 
@@ -165,7 +167,7 @@ fn tickets_table_with_width(
         out.push(' ');
         out.push_str(&ansi(
             ANSI_DIM,
-            &fit(&relative_date(t.created_at, now), DATE_WIDTH),
+            &fit(&relative_time(t.created_at, now), DATE_WIDTH),
         ));
         out.push_str("  ");
         if t.children.is_empty() {
@@ -210,7 +212,7 @@ pub fn ticket_detail(t: &Ticket, nicks: Option<&NickMap>) -> String {
             &format!(
                 "{} ({})  by {}",
                 friendly_date(t.created_at),
-                relative_date(t.created_at, OffsetDateTime::now_utc()),
+                relative_time(t.created_at, OffsetDateTime::now_utc()),
                 display_name(&t.created_by, nicks)
             ),
         ),
@@ -823,23 +825,6 @@ fn status_color(status: &str) -> &'static str {
         "closed" => ANSI_PURPLE,
         _ => ANSI_DIM,
     }
-}
-
-fn relative_date(then: OffsetDateTime, now: OffsetDateTime) -> String {
-    let seconds = (now - then).whole_seconds().max(0);
-    if seconds < 60 * 60 {
-        return "0d".to_string();
-    }
-    if seconds < 60 * 60 * 24 {
-        return format!("{}h", seconds / (60 * 60));
-    }
-    if seconds < 60 * 60 * 24 * 30 {
-        return format!("{}d", seconds / (60 * 60 * 24));
-    }
-    if seconds < 60 * 60 * 24 * 365 {
-        return format!("{}mo", seconds / (60 * 60 * 24 * 30));
-    }
-    format!("{}y", seconds / (60 * 60 * 24 * 365))
 }
 
 fn friendly_date(when: OffsetDateTime) -> String {

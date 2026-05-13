@@ -316,6 +316,18 @@ fn help_lists_sync_and_pull_but_not_push() {
 }
 
 #[test]
+fn bare_ti_defaults_to_list() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "bare ti");
+
+    repo.ti()
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bare ti"))
+        .stderr(predicate::str::contains("unknown tag mode").not());
+}
+
+#[test]
 fn init_bootstraps_git_meta_defaults() {
     let repo = TestRepo::new();
     git(

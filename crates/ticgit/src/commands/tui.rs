@@ -62,6 +62,7 @@ const DETAIL_WIDTH_PERCENT_STEP: u16 = 5;
 use crate::commands::{open_store, SessionGitDir};
 use crate::editor;
 use crate::session_state::{SavedView, State};
+use crate::timefmt::relative_time;
 
 #[derive(Debug, Parser)]
 pub struct Args {}
@@ -254,7 +255,6 @@ const ORDER_CHOICES: [OrderChoice; 4] = [
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputKind {
-    Comment,
     Priority,
     Points,
     AddTags,
@@ -1254,7 +1254,7 @@ impl App {
                 "Created",
                 &format!(
                     "{} ago by {}",
-                    relative_date(ticket.created_at, OffsetDateTime::now_utc()),
+                    relative_time(ticket.created_at, OffsetDateTime::now_utc()),
                     created_by_display(ticket)
                 ),
             ),
@@ -1453,7 +1453,7 @@ impl App {
             let mut lines = vec![
                 Line::from(vec![
                     Span::styled(
-                        relative_date(comment.at, OffsetDateTime::now_utc()),
+                        relative_time(comment.at, OffsetDateTime::now_utc()),
                         Style::default()
                             .fg(Color::DarkGray)
                             .add_modifier(Modifier::DIM),
@@ -1484,7 +1484,6 @@ impl App {
         let area = centered_rect(70, kind.modal_height(), frame.area());
         let title = format!("Edit {}", kind.label());
         let help = match kind {
-            InputKind::Comment => "Enter a comment to append.".to_string(),
             InputKind::Priority => format!(
                 "Enter priority. Lower is more important. Empty clears it. {}",
                 self.priority_range_display()
@@ -1670,7 +1669,7 @@ impl App {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            relative_date(version.at, OffsetDateTime::now_utc()),
+                            relative_time(version.at, OffsetDateTime::now_utc()),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]))
@@ -1706,7 +1705,7 @@ impl App {
                     version
                         .at
                         .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_else(|_| relative_date(version.at, OffsetDateTime::now_utc())),
+                        .unwrap_or_else(|_| relative_time(version.at, OffsetDateTime::now_utc())),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::raw("  "),
@@ -2610,7 +2609,7 @@ impl App {
             }
             KeyCode::Char('c') => {
                 if self.active_tab == TuiTab::Issues {
-                    self.begin_input(InputKind::Comment);
+                    self.add_comment_in_editor(terminal)?;
                 } else {
                     self.set_selected_writeup_status(WriteupStatus::Closed)?;
                 }
@@ -3365,6 +3364,39 @@ impl App {
         Ok(())
     }
 
+    fn add_comment_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let Some(ticket) = self.selected_ticket() else {
+            self.status = Some("Select a ticket first.".to_string());
+            return Ok(());
+        };
+        let id = ticket.id;
+
+        suspend_terminal(terminal)?;
+        let comment = editor::capture("Ticket comment (lines starting with # are ignored)");
+        resume_terminal(terminal)?;
+
+        match comment? {
+            Some(comment) if !comment.trim().is_empty() => {
+                self.store.add_comment(&id, comment.trim())?;
+                self.status = Some("Added comment.".to_string());
+            }
+            _ => {
+                self.status = Some("Cancelled.".to_string());
+            }
+        }
+
+        self.reload(Some(id))?;
+        if let Some(ticket) = self.selected_ticket() {
+            if !ticket.comments.is_empty() {
+                self.comment_state.select(Some(ticket.comments.len() - 1));
+            }
+        }
+        Ok(())
+    }
+
     fn promote_selected_writeup(&mut self) -> Result<()> {
         let Some(writeup) = self.selected_writeup() else {
             self.status = Some("Select a writeup first.".to_string());
@@ -3560,7 +3592,7 @@ impl App {
                 .and_then(|ticket| ticket.points)
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
-            InputKind::Comment | InputKind::AddTags | InputKind::RemoveTags => String::new(),
+            InputKind::AddTags | InputKind::RemoveTags => String::new(),
         };
         self.mode = Mode::Input(kind);
     }
@@ -3649,15 +3681,6 @@ impl App {
         };
 
         match kind {
-            InputKind::Comment => {
-                let body = self.input.trim();
-                if body.is_empty() {
-                    self.status = Some("Comment cannot be empty.".to_string());
-                    return Ok(false);
-                }
-                self.store.add_comment(&id, body)?;
-                self.status = Some("Added comment.".to_string());
-            }
             InputKind::Priority => {
                 let priority = match parse_optional_i64(&self.input, "priority") {
                     Ok(priority) => priority,
@@ -3690,13 +3713,6 @@ impl App {
         }
 
         self.reload(preferred_after_reload)?;
-        if kind == InputKind::Comment {
-            if let Some(ticket) = self.selected_ticket() {
-                if !ticket.comments.is_empty() {
-                    self.comment_state.select(Some(ticket.comments.len() - 1));
-                }
-            }
-        }
         Ok(true)
     }
 
@@ -4761,7 +4777,6 @@ fn order_choice_index(choice: OrderChoice) -> usize {
 impl InputKind {
     fn label(self) -> &'static str {
         match self {
-            InputKind::Comment => "comment",
             InputKind::Priority => "priority",
             InputKind::Points => "points",
             InputKind::AddTags => "add tags",
@@ -4771,7 +4786,6 @@ impl InputKind {
 
     fn modal_height(self) -> u16 {
         match self {
-            InputKind::Comment => 14,
             InputKind::Priority
             | InputKind::Points
             | InputKind::AddTags
@@ -4989,7 +5003,7 @@ fn writeup_list_line(writeup: &Writeup, width: usize, compact: bool) -> Line<'st
     let meta = vec![
         (
             fit_display(
-                &relative_date(writeup_recent_at(writeup), OffsetDateTime::now_utc()),
+                &relative_time(writeup_recent_at(writeup), OffsetDateTime::now_utc()),
                 LIST_AGE_WIDTH,
             ),
             Style::default()
@@ -5263,7 +5277,7 @@ fn list_meta_display(ticket: &Ticket) -> Vec<(String, Style)> {
     vec![
         (
             fit_display(
-                &relative_date(ticket.created_at, OffsetDateTime::now_utc()),
+                &relative_time(ticket.created_at, OffsetDateTime::now_utc()),
                 LIST_AGE_WIDTH,
             ),
             Style::default()
@@ -5521,7 +5535,7 @@ fn github_author(description: &str) -> Option<&str> {
 }
 
 fn comment_summary_line(comment: &Comment, width: usize) -> Line<'static> {
-    let date = relative_date(comment.at, OffsetDateTime::now_utc());
+    let date = relative_time(comment.at, OffsetDateTime::now_utc());
     let author = comment_author_display(&comment.author);
     let prefix_width =
         UnicodeWidthStr::width(date.as_str()) + 2 + UnicodeWidthStr::width(author.as_str()) + 2;
@@ -5625,7 +5639,7 @@ fn writeup_metadata_lines(writeup: &Writeup, width: usize) -> Vec<Line<'static>>
             label: "Updated",
             value: format!(
                 "{} ago",
-                relative_date(writeup_recent_at(writeup), OffsetDateTime::now_utc())
+                relative_time(writeup_recent_at(writeup), OffsetDateTime::now_utc())
             ),
         },
         MetadataField {
@@ -5896,23 +5910,6 @@ fn status_state_line(ticket: &Ticket) -> Line<'static> {
             Style::default().fg(Color::Green),
         ),
     ])
-}
-
-fn relative_date(then: OffsetDateTime, now: OffsetDateTime) -> String {
-    let seconds = (now - then).whole_seconds().max(0);
-    if seconds < 60 * 60 {
-        return "0d".to_string();
-    }
-    if seconds < 60 * 60 * 24 {
-        return format!("{}h", seconds / (60 * 60));
-    }
-    if seconds < 60 * 60 * 24 * 30 {
-        return format!("{}d", seconds / (60 * 60 * 24));
-    }
-    if seconds < 60 * 60 * 24 * 365 {
-        return format!("{}mo", seconds / (60 * 60 * 24 * 30));
-    }
-    format!("{}y", seconds / (60 * 60 * 24 * 365))
 }
 
 fn new_ticket_field_line(
