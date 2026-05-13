@@ -15,6 +15,8 @@ Also ships with `ti tui` for a cool TUI version.
 
 Everything has `--json` output for scripting and `--markdown` output for agentic use. You can also train your agent to use it by asking it to run `ti agent`. 
 
+You can also do specs and writeups and lots of fun stuff.
+
 ## Install
 
 Download a pre-built binary:
