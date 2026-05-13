@@ -145,18 +145,17 @@ fn tickets_table_with_width(
     );
 
     let mut out = String::new();
-    let mut header = format!(
-        "  {} {}  {} {} {}",
-        fit("TicId", id_width),
-        fit("Date", DATE_WIDTH),
+    let mut header = format!("  {} {} ", fit("TicId", id_width), fit("Date", DATE_WIDTH),);
+    if layout.show_priority {
+        header.push_str(&fit("Pri", PRIORITY_WIDTH));
+        header.push(' ');
+    }
+    header.push_str(&format!(
+        " {} {} {}",
         fit("Title", layout.title_width),
         fit("Status", STATUS_WIDTH),
         fit("State", STATE_WIDTH)
-    );
-    if layout.show_priority {
-        header.push(' ');
-        header.push_str(&fit("Pri", PRIORITY_WIDTH));
-    }
+    ));
     if layout.show_assigned {
         header.push(' ');
         header.push_str(&fit("Assgn", ASSIGNED_WIDTH));
@@ -182,7 +181,16 @@ fn tickets_table_with_width(
             ANSI_DIM,
             &fit(&relative_time(t.created_at, now), DATE_WIDTH),
         ));
-        out.push_str("  ");
+        out.push(' ');
+        if layout.show_priority {
+            let priority = t
+                .priority
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            out.push_str(&ansi(ANSI_PURPLE, &fit(&priority, PRIORITY_WIDTH)));
+            out.push(' ');
+        }
+        out.push(' ');
         if t.children.is_empty() {
             out.push_str(&ansi(
                 ANSI_BLUE,
@@ -204,14 +212,6 @@ fn tickets_table_with_width(
             state_color(t.state.as_str()),
             &fit(t.state.as_str(), STATE_WIDTH),
         ));
-        if layout.show_priority {
-            out.push(' ');
-            let priority = t
-                .priority
-                .map(|value| value.to_string())
-                .unwrap_or_default();
-            out.push_str(&ansi(ANSI_PURPLE, &fit(&priority, PRIORITY_WIDTH)));
-        }
         if layout.show_assigned {
             out.push_str(&fit(&flatten(&assigned), ASSIGNED_WIDTH));
         }
@@ -1005,6 +1005,7 @@ mod tests {
 
         assert!(table.contains("Pri"));
         assert!(table.contains(" 2   "));
+        assert!(table.find("Pri").unwrap() < table.find("Title").unwrap());
         assert!(table.contains("Assgn"));
         assert!(table.contains("Tags"));
     }
