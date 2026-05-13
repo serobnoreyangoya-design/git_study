@@ -33,6 +33,7 @@ const LIST_STATE_WIDTH: usize = 2;
 const LIST_AGE_WIDTH: usize = 3;
 const LIST_PRIORITY_WIDTH: usize = 3;
 const COMPACT_LIST_MIN_TITLE_WIDTH: usize = 24;
+const ISSUE_TABLE_MIN_TITLE_WIDTH: usize = 30;
 const ANSI_TAG_COLORS: [Color; 12] = [
     Color::Blue,
     Color::Cyan,
@@ -5379,7 +5380,7 @@ fn issue_columns_for_width(columns: &[IssueColumn], width: usize) -> Vec<IssueCo
         IssueColumn::Closed,
         IssueColumn::Id,
     ] {
-        if issue_columns_min_width(&columns) <= width {
+        if issue_columns_min_width_with_title(&columns, ISSUE_TABLE_MIN_TITLE_WIDTH) <= width {
             break;
         }
         if let Some(idx) = columns.iter().position(|column| *column == removable) {
@@ -5390,10 +5391,10 @@ fn issue_columns_for_width(columns: &[IssueColumn], width: usize) -> Vec<IssueCo
     columns
 }
 
-fn issue_columns_min_width(columns: &[IssueColumn]) -> usize {
+fn issue_columns_min_width_with_title(columns: &[IssueColumn], title_width: usize) -> usize {
     let fixed = columns
         .iter()
-        .map(|column| column.fixed_width().unwrap_or(1))
+        .map(|column| column.fixed_width().unwrap_or(title_width))
         .sum::<usize>();
     fixed + columns.len().saturating_sub(1)
 }
@@ -7044,8 +7045,17 @@ mod tests {
 
         assert_eq!(issue_columns_for_width(&columns, 80), columns);
         assert_eq!(
-            issue_columns_for_width(&columns, 12),
-            vec![IssueColumn::Id, IssueColumn::Closed, IssueColumn::Title]
+            issue_columns_for_width(&columns, 43),
+            vec![
+                IssueColumn::Id,
+                IssueColumn::Closed,
+                IssueColumn::Priority,
+                IssueColumn::Title
+            ]
+        );
+        assert_eq!(
+            issue_columns_for_width(&columns, 38),
+            vec![IssueColumn::Id, IssueColumn::Title]
         );
         assert_eq!(
             issue_columns_for_width(&columns, 3),
