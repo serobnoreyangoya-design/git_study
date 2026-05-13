@@ -71,6 +71,8 @@ pub struct SavedView {
     pub subissues: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub limit: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
 }
 
 fn is_false(v: &bool) -> bool {

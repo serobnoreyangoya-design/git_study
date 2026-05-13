@@ -1,6 +1,7 @@
 //! Per-subcommand handlers. Each module exposes `Args` (a clap struct)
 //! and `run(args) -> anyhow::Result<()>`.
 
+pub mod agent;
 pub mod assign;
 pub mod checkout;
 pub mod claim;

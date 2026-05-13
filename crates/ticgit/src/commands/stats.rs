@@ -59,10 +59,16 @@ pub fn run(args: Args) -> Result<()> {
     let mut assignees: BTreeMap<String, usize> = BTreeMap::new();
     let nick_map = crate::render::build_nick_map(&store.list_users().unwrap_or_default());
 
+    let mut recently_opened: Vec<(OffsetDateTime, String, String)> = Vec::new();
     // Collect recently closed tickets (by created_at as proxy for activity).
     let mut recently_closed: Vec<(String, String)> = Vec::new(); // (short_id, title)
 
     for t in &tickets {
+        recently_opened.push((
+            t.created_at,
+            t.id.to_string().chars().take(6).collect(),
+            t.title.clone(),
+        ));
         match t.status {
             ticgit_lib::TicketStatus::Open => open += 1,
             ticgit_lib::TicketStatus::Closed => {
@@ -99,6 +105,7 @@ pub fn run(args: Args) -> Result<()> {
             *assignees.entry(short).or_default() += 1;
         }
     }
+    recently_opened.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
 
     if args.json {
         let states_json: serde_json::Value = states
@@ -188,6 +195,13 @@ pub fn run(args: Args) -> Result<()> {
             }
         }
 
+        if !recently_opened.is_empty() {
+            println!("\n## Recently Opened\n");
+            for (_, id, title) in recently_opened.iter().take(10) {
+                println!("- `{id}` {title}");
+            }
+        }
+
         return Ok(());
     }
 
@@ -236,8 +250,8 @@ pub fn run(args: Args) -> Result<()> {
 
     let assignee_limit = assignee_vec.len().min(3);
 
-    // Recently closed: show if there's vertical room.
-    let recently_closed_limit = if two_col {
+    // Recently opened/closed: show if there's vertical room.
+    let (recently_opened_limit, recently_closed_limit) = if two_col {
         let left_rows = state_vec.len()
             + 1
             + if created_7d > 0 || closed_7d > 0 {
@@ -255,15 +269,35 @@ pub fn run(args: Args) -> Result<()> {
                 0
             };
         let used = left_rows.max(right_rows);
-        avail
-            .saturating_sub(used + 1)
-            .min(recently_closed.len())
-            .min(5)
+        let remaining = avail.saturating_sub(used + 1);
+        if remaining < 3 {
+            (0, 0)
+        } else {
+            let opened = remaining
+                .saturating_sub(1)
+                .min(recently_opened.len())
+                .min(3);
+            let closed = remaining
+                .saturating_sub(opened + usize::from(opened > 0) + 1)
+                .min(recently_closed.len())
+                .min(5);
+            (opened, closed)
+        }
     } else {
-        avail
-            .saturating_sub(state_vec.len() + tag_limit + 10)
-            .min(recently_closed.len())
-            .min(3)
+        let remaining = avail.saturating_sub(state_vec.len() + tag_limit + 10);
+        if remaining < 3 {
+            (0, 0)
+        } else {
+            let opened = remaining
+                .saturating_sub(1)
+                .min(recently_opened.len())
+                .min(3);
+            let closed = remaining
+                .saturating_sub(opened + usize::from(opened > 0) + 1)
+                .min(recently_closed.len())
+                .min(3);
+            (opened, closed)
+        }
     };
 
     // ── Build output ──
@@ -357,6 +391,25 @@ pub fn run(args: Args) -> Result<()> {
             right_lines.push(String::new());
         }
 
+        // Right: Recently Opened
+        if recently_opened_limit > 0 {
+            right_lines.push(format!("{GREEN}{BOLD}  Recently Opened{RESET}"));
+            for (_, id, title) in recently_opened.iter().take(recently_opened_limit) {
+                let max_title = col_width.saturating_sub(12);
+                let display_title = if title.len() > max_title {
+                    format!("{}...", &title[..max_title.saturating_sub(3)])
+                } else {
+                    title.clone()
+                };
+                right_lines.push(format!("    {DIM}{id}{RESET} {display_title}"));
+            }
+            let remaining = recently_opened.len().saturating_sub(recently_opened_limit);
+            if remaining > 0 {
+                right_lines.push(format!("    {DIM}... and {remaining} more{RESET}"));
+            }
+            right_lines.push(String::new());
+        }
+
         // Right: Recently Closed
         if recently_closed_limit > 0 {
             right_lines.push(format!("{RED}{BOLD}  Recently Closed{RESET}"));
@@ -421,6 +474,20 @@ pub fn run(args: Args) -> Result<()> {
             }
             if closed_7d > 0 {
                 println!("    {RED}-{closed_7d}{RESET}{DIM} closed{RESET}");
+            }
+            println!();
+        }
+
+        if recently_opened_limit > 0 {
+            println!("  {GREEN}{BOLD}Recently Opened{RESET}");
+            for (_, id, title) in recently_opened.iter().take(recently_opened_limit) {
+                let max_title = width.saturating_sub(12);
+                let display_title = if title.len() > max_title {
+                    format!("{}...", &title[..max_title.saturating_sub(3)])
+                } else {
+                    title.clone()
+                };
+                println!("    {DIM}{id}{RESET} {display_title}");
             }
             println!();
         }

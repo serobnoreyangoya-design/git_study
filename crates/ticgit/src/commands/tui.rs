@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Stdout};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
@@ -33,6 +33,7 @@ const LIST_STATE_WIDTH: usize = 2;
 const LIST_AGE_WIDTH: usize = 3;
 const LIST_PRIORITY_WIDTH: usize = 3;
 const COMPACT_LIST_MIN_TITLE_WIDTH: usize = 24;
+const ISSUE_TABLE_MIN_TITLE_WIDTH: usize = 30;
 const ANSI_TAG_COLORS: [Color; 12] = [
     Color::Blue,
     Color::Cyan,
@@ -62,6 +63,7 @@ const DETAIL_WIDTH_PERCENT_STEP: u16 = 5;
 use crate::commands::{open_store, SessionGitDir};
 use crate::editor;
 use crate::session_state::{SavedView, State};
+use crate::timefmt::relative_time;
 
 #[derive(Debug, Parser)]
 pub struct Args {}
@@ -128,8 +130,48 @@ fn resume_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<
     Ok(())
 }
 
+fn load_closed_times(
+    git_dir: &std::path::Path,
+    tickets: &[Ticket],
+) -> HashMap<uuid::Uuid, OffsetDateTime> {
+    let db_path = git_dir.join("git-meta.sqlite");
+    let Ok(conn) =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return HashMap::new();
+    };
+
+    tickets
+        .iter()
+        .filter(|ticket| ticket.status == TicketStatus::Closed)
+        .filter_map(|ticket| {
+            query_closed_at(&conn, ticket.id).map(|closed_at| (ticket.id, closed_at))
+        })
+        .collect()
+}
+
+fn query_closed_at(conn: &rusqlite::Connection, id: uuid::Uuid) -> Option<OffsetDateTime> {
+    let status_key = format!("ticgit:tickets:{id}:status");
+    let closed_by_key = format!("ticgit:tickets:{id}:closed-by");
+    let timestamp_ms: i64 = conn
+        .query_row(
+            "SELECT timestamp \
+             FROM metadata_log \
+             WHERE target_type = 'project' \
+               AND operation != 'remove' \
+               AND ((key = ?1 AND value IN ('\"closed\"', 'closed')) OR key = ?2) \
+             ORDER BY timestamp DESC \
+             LIMIT 1",
+            rusqlite::params![status_key, closed_by_key],
+            |row| row.get(0),
+        )
+        .ok()?;
+    OffsetDateTime::from_unix_timestamp(timestamp_ms / 1000).ok()
+}
+
 struct App {
     store: TicketStore,
+    all_tickets: Vec<Ticket>,
     tickets: Vec<Ticket>,
     visible: Vec<usize>,
     writeups: Vec<Writeup>,
@@ -150,6 +192,9 @@ struct App {
     only_tagged: bool,
     hide_subissues: bool,
     sort_order: Option<SortOrder>,
+    sort_closed_desc: bool,
+    closed_at: HashMap<uuid::Uuid, OffsetDateTime>,
+    issue_columns: Vec<IssueColumn>,
     filter: String,
     tag_filter: BTreeSet<String>,
     tag_filter_match_all: bool,
@@ -158,6 +203,7 @@ struct App {
     link_issue_state: ListState,
     version_state: ListState,
     order_state: ListState,
+    column_state: ListState,
     mode: Mode,
     input: String,
     new_ticket: NewTicketDraft,
@@ -182,6 +228,7 @@ enum ViewMode {
 enum TuiTab {
     Issues,
     Writeups,
+    Dashboard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +267,7 @@ enum Mode {
     Tags,
     ManageTags,
     Order,
+    Columns,
     SavedViews,
     ConfirmDeleteView,
     SaveView,
@@ -245,16 +293,41 @@ enum OrderChoice {
     State,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssueColumn {
+    Id,
+    Date,
+    Closed,
+    Priority,
+    State,
+    Title,
+    Assignee,
+    Points,
+    Milestone,
+    Tags,
+}
+
 const ORDER_CHOICES: [OrderChoice; 4] = [
     OrderChoice::Priority,
     OrderChoice::DateAsc,
     OrderChoice::DateDesc,
     OrderChoice::State,
 ];
+const ISSUE_COLUMN_CHOICES: [IssueColumn; 10] = [
+    IssueColumn::Id,
+    IssueColumn::Date,
+    IssueColumn::Closed,
+    IssueColumn::Priority,
+    IssueColumn::State,
+    IssueColumn::Title,
+    IssueColumn::Assignee,
+    IssueColumn::Points,
+    IssueColumn::Milestone,
+    IssueColumn::Tags,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputKind {
-    Comment,
     Priority,
     Points,
     AddTags,
@@ -290,6 +363,7 @@ impl App {
             .clamp(DETAIL_WIDTH_PERCENT_MIN, DETAIL_WIDTH_PERCENT_MAX);
         let mut app = Self {
             store,
+            all_tickets: Vec::new(),
             tickets: Vec::new(),
             visible: Vec::new(),
             writeups: Vec::new(),
@@ -310,6 +384,9 @@ impl App {
             only_tagged: false,
             hide_subissues: false,
             sort_order: None,
+            sort_closed_desc: false,
+            closed_at: HashMap::new(),
+            issue_columns: default_issue_columns(),
             filter: String::new(),
             tag_filter: BTreeSet::new(),
             tag_filter_match_all: true,
@@ -318,6 +395,7 @@ impl App {
             link_issue_state: ListState::default(),
             version_state: ListState::default(),
             order_state: ListState::default(),
+            column_state: ListState::default(),
             mode: Mode::Normal,
             input: String::new(),
             new_ticket: NewTicketDraft::default(),
@@ -336,8 +414,11 @@ impl App {
     }
 
     fn reload(&mut self, preferred_id: Option<uuid::Uuid>) -> Result<()> {
+        let tickets = self.store.list()?;
+        self.closed_at = load_closed_times(&self.store.session().repo_git_dir(), &tickets);
+        self.all_tickets = tickets.clone();
         self.tickets = query::apply(
-            self.store.list()?,
+            tickets,
             &Filter {
                 status: self.base_status,
                 state: self.base_state,
@@ -348,7 +429,15 @@ impl App {
                 ..Default::default()
             },
         );
-        if self.sort_order.is_none() {
+        if self.sort_closed_desc {
+            let closed_at = &self.closed_at;
+            self.tickets.sort_by(|a, b| {
+                closed_at_for(closed_at, b)
+                    .cmp(&closed_at_for(closed_at, a))
+                    .then_with(|| b.created_at.cmp(&a.created_at))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+        } else if self.sort_order.is_none() {
             self.tickets.sort_by(compare_tui_tickets);
         }
         self.apply_filter();
@@ -482,6 +571,7 @@ impl App {
                     ViewMode::Board => self.draw_board(frame, outer[0]),
                 },
                 TuiTab::Writeups => self.draw_writeup_list(frame, outer[0]),
+                TuiTab::Dashboard => self.draw_dashboard(frame, outer[0]),
             }
         }
         if self.sync.is_some() {
@@ -495,6 +585,7 @@ impl App {
             Mode::Tags => self.draw_tags_modal(frame),
             Mode::ManageTags => self.draw_manage_tags_modal(frame),
             Mode::Order => self.draw_order_modal(frame),
+            Mode::Columns => self.draw_columns_modal(frame),
             Mode::SavedViews => self.draw_saved_views_modal(frame),
             Mode::ConfirmDeleteView => self.draw_delete_view_confirm_modal(frame),
             Mode::SaveView => self.draw_save_view_modal(frame),
@@ -624,6 +715,32 @@ impl App {
                     MenuHint {
                         key: "Esc",
                         desc: "cancel",
+                    },
+                ],
+            ),
+            Mode::Columns => (
+                "columns",
+                Some(issue_columns_label(&self.issue_columns)),
+                vec![
+                    MenuHint {
+                        key: "j/k",
+                        desc: "move",
+                    },
+                    MenuHint {
+                        key: "Space",
+                        desc: "toggle",
+                    },
+                    MenuHint {
+                        key: "d",
+                        desc: "default",
+                    },
+                    MenuHint {
+                        key: "V",
+                        desc: "save view",
+                    },
+                    MenuHint {
+                        key: "Esc",
+                        desc: "finish",
                     },
                 ],
             ),
@@ -834,6 +951,25 @@ impl App {
                             desc: "quit",
                         },
                     ]
+                } else if self.active_tab == TuiTab::Dashboard {
+                    vec![
+                        MenuHint {
+                            key: "Tab",
+                            desc: "issues",
+                        },
+                        MenuHint {
+                            key: "r",
+                            desc: "refresh",
+                        },
+                        MenuHint {
+                            key: "S",
+                            desc: "sync",
+                        },
+                        MenuHint {
+                            key: "q",
+                            desc: "quit",
+                        },
+                    ]
                 } else if self.active_tab == TuiTab::Writeups {
                     vec![
                         MenuHint {
@@ -991,6 +1127,10 @@ impl App {
                             desc: "order",
                         },
                         MenuHint {
+                            key: "x",
+                            desc: "columns",
+                        },
+                        MenuHint {
                             key: "1-9",
                             desc: "writeup",
                         },
@@ -1097,27 +1237,41 @@ impl App {
         let title = tabs_title(self.active_tab, &title);
 
         let block = Block::default().borders(Borders::ALL).title(title);
-        let row_width = usize::from(block.inner(area).width)
-            .saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
+        let inner = block.inner(area);
+        let row_width =
+            usize::from(inner.width).saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
         let compact = self.detail.is_some();
+        let columns = issue_columns_for_width(&self.issue_columns, row_width);
+        let widths = issue_column_widths(&columns, row_width);
 
         let items: Vec<ListItem<'_>> = self
             .visible
             .iter()
             .map(|&idx| {
                 let ticket = &self.tickets[idx];
-                ListItem::new(ticket_list_line(
+                ListItem::new(ticket_table_line(
                     ticket,
+                    &columns,
+                    &widths,
                     row_width,
                     compact,
                     self.store.email(),
+                    self.closed_at.get(&ticket.id).copied(),
                     !self.linked_writeups(ticket.id).is_empty(),
                 ))
             })
             .collect();
 
+        frame.render_widget(block, area);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        frame.render_widget(
+            Paragraph::new(issue_table_header(&columns, &widths, row_width)),
+            chunks[0],
+        );
         let list = List::new(items)
-            .block(block)
             .highlight_style(
                 Style::default()
                     .bg(Color::Rgb(0, 0, 95))
@@ -1126,7 +1280,7 @@ impl App {
             )
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
-        frame.render_stateful_widget(list, area, &mut self.list_state);
+        frame.render_stateful_widget(list, chunks[1], &mut self.list_state);
     }
 
     fn draw_writeup_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1178,6 +1332,21 @@ impl App {
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(list, area, &mut self.writeup_state);
+    }
+
+    fn draw_dashboard(&self, frame: &mut Frame<'_>, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(tabs_title(self.active_tab, "Project stats"));
+        let inner = block.inner(area);
+        let width = usize::from(inner.width);
+        let height = usize::from(inner.height);
+        let stats = DashboardStats::from_tickets(&self.all_tickets);
+        let lines = dashboard_lines(&stats, &self.closed_at, width, height);
+        let dashboard = Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        frame.render_widget(dashboard, area);
     }
 
     fn draw_board(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1254,7 +1423,7 @@ impl App {
                 "Created",
                 &format!(
                     "{} ago by {}",
-                    relative_date(ticket.created_at, OffsetDateTime::now_utc()),
+                    relative_time(ticket.created_at, OffsetDateTime::now_utc()),
                     created_by_display(ticket)
                 ),
             ),
@@ -1453,7 +1622,7 @@ impl App {
             let mut lines = vec![
                 Line::from(vec![
                     Span::styled(
-                        relative_date(comment.at, OffsetDateTime::now_utc()),
+                        relative_time(comment.at, OffsetDateTime::now_utc()),
                         Style::default()
                             .fg(Color::DarkGray)
                             .add_modifier(Modifier::DIM),
@@ -1484,7 +1653,6 @@ impl App {
         let area = centered_rect(70, kind.modal_height(), frame.area());
         let title = format!("Edit {}", kind.label());
         let help = match kind {
-            InputKind::Comment => "Enter a comment to append.".to_string(),
             InputKind::Priority => format!(
                 "Enter priority. Lower is more important. Empty clears it. {}",
                 self.priority_range_display()
@@ -1670,7 +1838,7 @@ impl App {
                         ),
                         Span::raw(" "),
                         Span::styled(
-                            relative_date(version.at, OffsetDateTime::now_utc()),
+                            relative_time(version.at, OffsetDateTime::now_utc()),
                             Style::default().fg(Color::DarkGray),
                         ),
                     ]))
@@ -1706,7 +1874,7 @@ impl App {
                     version
                         .at
                         .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_else(|_| relative_date(version.at, OffsetDateTime::now_utc())),
+                        .unwrap_or_else(|_| relative_time(version.at, OffsetDateTime::now_utc())),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::raw("  "),
@@ -1896,6 +2064,75 @@ impl App {
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_widget(Clear, area);
         frame.render_stateful_widget(list, area, &mut self.order_state);
+    }
+
+    fn draw_columns_modal(&mut self, frame: &mut Frame<'_>) {
+        let area = centered_rect(64, 17, frame.area());
+        let selected = self
+            .column_state
+            .selected()
+            .unwrap_or(0)
+            .min(ISSUE_COLUMN_CHOICES.len().saturating_sub(1));
+        self.column_state.select(Some(selected));
+
+        let items = ISSUE_COLUMN_CHOICES
+            .iter()
+            .map(|column| {
+                let checked = if self.issue_columns.contains(column) {
+                    "[x]"
+                } else {
+                    "[ ]"
+                };
+                let locked = if *column == IssueColumn::Title {
+                    " required"
+                } else {
+                    ""
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(checked, Style::default().fg(Color::Yellow)),
+                    Span::raw(" "),
+                    Span::styled(
+                        fit_display(column.label(), 10),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(" "),
+                    Span::styled(column.description(), Style::default().fg(Color::Gray)),
+                    Span::styled(locked, Style::default().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect::<Vec<_>>();
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        let title = format!("Columns: {}", issue_columns_label(&self.issue_columns));
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(0, 0, 95))
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
+            .highlight_spacing(HighlightSpacing::Always);
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("Space", Style::default().fg(Color::Yellow)),
+            Span::raw(" show/hide  "),
+            Span::styled("d", Style::default().fg(Color::Yellow)),
+            Span::raw(" default  "),
+            Span::styled("V", Style::default().fg(Color::Yellow)),
+            Span::raw(" save view  "),
+            Span::styled("Enter/Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" finish"),
+        ]))
+        .style(Style::default().bg(Color::DarkGray));
+        frame.render_widget(Clear, area);
+        frame.render_stateful_widget(list, chunks[0], &mut self.column_state);
+        frame.render_widget(help, chunks[1]);
     }
 
     fn draw_saved_views_modal(&mut self, frame: &mut Frame<'_>) {
@@ -2195,6 +2432,15 @@ impl App {
                 lines.push(help_columns(("3", "date desc"), Some(("4", "state"))));
                 lines.push(help_columns(("Esc", "cancel"), None));
             }
+            Mode::Columns => {
+                help_section(&mut lines, "Columns");
+                lines.push(help_columns(
+                    ("j/k", "move column"),
+                    Some(("Space", "show / hide")),
+                ));
+                lines.push(help_columns(("d", "default"), Some(("V", "save view"))));
+                lines.push(help_columns(("Enter", "finish"), Some(("Esc", "finish"))));
+            }
             Mode::SavedViews => {
                 help_section(&mut lines, "Views");
                 lines.push(help_columns(
@@ -2308,6 +2554,11 @@ impl App {
                     Some(("r", "refresh")),
                 ));
             }
+            Mode::Normal if self.active_tab == TuiTab::Dashboard => {
+                help_section(&mut lines, "Dashboard");
+                lines.push(help_columns(("Tab", "issues tab"), Some(("r", "refresh"))));
+                lines.push(help_columns(("S", "sync tickets"), Some(("q", "quit"))));
+            }
             Mode::Normal if self.view == ViewMode::Board && self.detail.is_none() => {
                 help_section(&mut lines, "Navigation");
                 lines.push(help_columns(
@@ -2354,7 +2605,7 @@ impl App {
                     Some(("g", "tag picker")),
                 ));
                 lines.push(help_columns(("o", "order"), Some(("v", "saved views"))));
-                lines.push(help_columns(("V", "save view"), None));
+                lines.push(help_columns(("x", "columns"), Some(("V", "save view"))));
 
                 help_section(&mut lines, "Edit Ticket");
                 lines.push(help_columns(("C", "claim"), Some(("s", "state"))));
@@ -2421,6 +2672,10 @@ impl App {
             }
             Mode::Order => {
                 self.handle_order_key(key)?;
+                false
+            }
+            Mode::Columns => {
+                self.handle_columns_key(key)?;
                 false
             }
             Mode::SavedViews => {
@@ -2526,6 +2781,12 @@ impl App {
                 }
                 false
             }
+            KeyCode::Char('x') => {
+                if self.active_tab == TuiTab::Issues && self.view == ViewMode::List {
+                    self.begin_columns();
+                }
+                false
+            }
             KeyCode::Char('b') => {
                 if self.active_tab == TuiTab::Issues {
                     self.handle_board_key();
@@ -2610,7 +2871,7 @@ impl App {
             }
             KeyCode::Char('c') => {
                 if self.active_tab == TuiTab::Issues {
-                    self.begin_input(InputKind::Comment);
+                    self.add_comment_in_editor(terminal)?;
                 } else {
                     self.set_selected_writeup_status(WriteupStatus::Closed)?;
                 }
@@ -2756,6 +3017,24 @@ impl App {
             KeyCode::Char('2') => self.apply_order_choice(OrderChoice::DateAsc)?,
             KeyCode::Char('3') => self.apply_order_choice(OrderChoice::DateDesc)?,
             KeyCode::Char('4') => self.apply_order_choice(OrderChoice::State)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_columns_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Enter | KeyCode::Esc => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.next_column_choice(),
+            KeyCode::Up | KeyCode::Char('k') => self.previous_column_choice(),
+            KeyCode::Char(' ') => self.toggle_selected_column(),
+            KeyCode::Char('d') => {
+                self.issue_columns = default_issue_columns();
+                self.status = Some("Restored default columns.".to_string());
+            }
+            KeyCode::Char('V') => self.begin_save_view(),
             _ => {}
         }
         Ok(())
@@ -3013,6 +3292,16 @@ impl App {
         self.mode = Mode::Order;
     }
 
+    fn begin_columns(&mut self) {
+        let selected = self
+            .column_state
+            .selected()
+            .unwrap_or(0)
+            .min(ISSUE_COLUMN_CHOICES.len().saturating_sub(1));
+        self.column_state.select(Some(selected));
+        self.mode = Mode::Columns;
+    }
+
     fn begin_saved_views(&mut self) {
         let views = self.view_entries();
         let selected = self
@@ -3103,10 +3392,19 @@ impl App {
             assigned: self.assigned_filter.clone(),
             only_tagged: self.only_tagged,
             search: optional_trimmed(&self.filter).map(ToString::to_string),
-            order: Some(self.current_order_choice().spec().to_string()),
+            order: Some(if self.sort_closed_desc {
+                "closed.desc".to_string()
+            } else {
+                self.current_order_choice().spec().to_string()
+            }),
             all: self.base_status.is_none() && self.base_state.is_none(),
             subissues: !self.hide_subissues,
             limit: 0,
+            columns: self
+                .issue_columns
+                .iter()
+                .map(|column| column.as_str().to_string())
+                .collect(),
         }
     }
 
@@ -3183,13 +3481,16 @@ impl App {
         self.filter = view.search.clone().unwrap_or_default();
         self.tag_filter = saved_view_tags(view).into_iter().collect();
         self.tag_filter_match_all = view.tag_match_all;
+        self.sort_closed_desc = matches!(view.order.as_deref(), Some("closed.desc" | "closed"));
         self.sort_order = match view.order.as_deref() {
+            Some("closed.desc" | "closed") => None,
             Some(spec) => Some(
                 SortOrder::parse(spec)
                     .ok_or_else(|| anyhow::anyhow!("unknown sort order `{spec}`"))?,
             ),
             None => None,
         };
+        self.issue_columns = saved_issue_columns(view);
         self.detail = None;
         self.writeup_detail = None;
         self.comments_mode = false;
@@ -3208,6 +3509,8 @@ impl App {
         self.only_tagged = false;
         self.hide_subissues = false;
         self.sort_order = None;
+        self.sort_closed_desc = false;
+        self.issue_columns = default_issue_columns();
         self.filter.clear();
         self.tag_filter.clear();
         self.tag_filter_match_all = true;
@@ -3365,6 +3668,40 @@ impl App {
         Ok(())
     }
 
+    fn add_comment_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let Some(ticket) = self.selected_ticket() else {
+            self.status = Some("Select a ticket first.".to_string());
+            return Ok(());
+        };
+        let id = ticket.id;
+        let title = ticket.title.clone();
+
+        suspend_terminal(terminal)?;
+        let comment = editor::capture_comment(&title);
+        resume_terminal(terminal)?;
+
+        match comment? {
+            Some(comment) if !comment.trim().is_empty() => {
+                self.store.add_comment(&id, comment.trim())?;
+                self.status = Some("Added comment.".to_string());
+            }
+            _ => {
+                self.status = Some("Cancelled.".to_string());
+            }
+        }
+
+        self.reload(Some(id))?;
+        if let Some(ticket) = self.selected_ticket() {
+            if !ticket.comments.is_empty() {
+                self.comment_state.select(Some(ticket.comments.len() - 1));
+            }
+        }
+        Ok(())
+    }
+
     fn promote_selected_writeup(&mut self) -> Result<()> {
         let Some(writeup) = self.selected_writeup() else {
             self.status = Some("Select a writeup first.".to_string());
@@ -3450,6 +3787,7 @@ impl App {
                 };
                 self.jump_to_ticket(ticket_id);
             }
+            TuiTab::Dashboard => {}
         }
     }
 
@@ -3560,7 +3898,7 @@ impl App {
                 .and_then(|ticket| ticket.points)
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
-            InputKind::Comment | InputKind::AddTags | InputKind::RemoveTags => String::new(),
+            InputKind::AddTags | InputKind::RemoveTags => String::new(),
         };
         self.mode = Mode::Input(kind);
     }
@@ -3649,15 +3987,6 @@ impl App {
         };
 
         match kind {
-            InputKind::Comment => {
-                let body = self.input.trim();
-                if body.is_empty() {
-                    self.status = Some("Comment cannot be empty.".to_string());
-                    return Ok(false);
-                }
-                self.store.add_comment(&id, body)?;
-                self.status = Some("Added comment.".to_string());
-            }
             InputKind::Priority => {
                 let priority = match parse_optional_i64(&self.input, "priority") {
                     Ok(priority) => priority,
@@ -3690,13 +4019,6 @@ impl App {
         }
 
         self.reload(preferred_after_reload)?;
-        if kind == InputKind::Comment {
-            if let Some(ticket) = self.selected_ticket() {
-                if !ticket.comments.is_empty() {
-                    self.comment_state.select(Some(ticket.comments.len() - 1));
-                }
-            }
-        }
         Ok(true)
     }
 
@@ -4103,6 +4425,47 @@ impl App {
         self.order_state.select(Some(previous));
     }
 
+    fn next_column_choice(&mut self) {
+        let selected = self.column_state.selected().unwrap_or(0);
+        self.column_state
+            .select(Some((selected + 1) % ISSUE_COLUMN_CHOICES.len()));
+    }
+
+    fn previous_column_choice(&mut self) {
+        let selected = self.column_state.selected().unwrap_or(0);
+        let previous = selected
+            .checked_sub(1)
+            .unwrap_or_else(|| ISSUE_COLUMN_CHOICES.len() - 1);
+        self.column_state.select(Some(previous));
+    }
+
+    fn toggle_selected_column(&mut self) {
+        let selected = self.column_state.selected().unwrap_or(0);
+        let Some(column) = ISSUE_COLUMN_CHOICES.get(selected).copied() else {
+            return;
+        };
+        if column == IssueColumn::Title {
+            self.status = Some("Title column is required.".to_string());
+            return;
+        }
+        if let Some(idx) = self
+            .issue_columns
+            .iter()
+            .position(|candidate| *candidate == column)
+        {
+            self.issue_columns.remove(idx);
+        } else {
+            self.issue_columns.push(column);
+            self.issue_columns
+                .sort_by_key(|column| issue_column_index(*column));
+        }
+        if !self.issue_columns.contains(&IssueColumn::Title) {
+            self.issue_columns.push(IssueColumn::Title);
+            self.issue_columns
+                .sort_by_key(|column| issue_column_index(*column));
+        }
+    }
+
     fn apply_selected_order(&mut self) -> Result<()> {
         let selected = self.order_state.selected().unwrap_or(0);
         let choice = ORDER_CHOICES
@@ -4288,6 +4651,9 @@ impl App {
             self.next_writeup();
             return;
         }
+        if self.active_tab == TuiTab::Dashboard {
+            return;
+        }
         if self.visible.is_empty() {
             return;
         }
@@ -4300,6 +4666,9 @@ impl App {
     fn previous(&mut self) {
         if self.active_tab == TuiTab::Writeups {
             self.previous_writeup();
+            return;
+        }
+        if self.active_tab == TuiTab::Dashboard {
             return;
         }
         if self.visible.is_empty() {
@@ -4387,7 +4756,8 @@ impl App {
                 self.view = ViewMode::List;
                 TuiTab::Writeups
             }
-            TuiTab::Writeups => TuiTab::Issues,
+            TuiTab::Writeups => TuiTab::Dashboard,
+            TuiTab::Dashboard => TuiTab::Issues,
         };
     }
 
@@ -4647,6 +5017,7 @@ impl App {
                     writeup.tags.clone(),
                 ))
             }
+            TuiTab::Dashboard => None,
         }
     }
 
@@ -4761,7 +5132,6 @@ fn order_choice_index(choice: OrderChoice) -> usize {
 impl InputKind {
     fn label(self) -> &'static str {
         match self {
-            InputKind::Comment => "comment",
             InputKind::Priority => "priority",
             InputKind::Points => "points",
             InputKind::AddTags => "add tags",
@@ -4771,7 +5141,6 @@ impl InputKind {
 
     fn modal_height(self) -> u16 {
         match self {
-            InputKind::Comment => 14,
             InputKind::Priority
             | InputKind::Points
             | InputKind::AddTags
@@ -4886,6 +5255,16 @@ fn compare_tui_tickets(a: &Ticket, b: &Ticket) -> std::cmp::Ordering {
         .then_with(|| a.id.cmp(&b.id))
 }
 
+fn closed_at_for(
+    closed_at: &HashMap<uuid::Uuid, OffsetDateTime>,
+    ticket: &Ticket,
+) -> OffsetDateTime {
+    closed_at
+        .get(&ticket.id)
+        .copied()
+        .unwrap_or(ticket.created_at)
+}
+
 fn priority_sort_key(priority: Option<i64>) -> (u8, i64) {
     match priority {
         Some(value) => (0, value),
@@ -4941,7 +5320,12 @@ fn tabs_title(active: TuiTab, title: &str) -> String {
     } else {
         " writeups "
     };
-    format!("{issues} {writeups}  {title}")
+    let dashboard = if active == TuiTab::Dashboard {
+        "[dashboard]"
+    } else {
+        " dashboard "
+    };
+    format!("{issues} {writeups} {dashboard}  {title}")
 }
 
 fn ticket_list_line(
@@ -4979,6 +5363,236 @@ fn ticket_list_line(
     )
 }
 
+fn issue_columns_for_width(columns: &[IssueColumn], width: usize) -> Vec<IssueColumn> {
+    let mut columns = columns.to_vec();
+    if !columns.contains(&IssueColumn::Title) {
+        columns.push(IssueColumn::Title);
+    }
+
+    for removable in [
+        IssueColumn::Tags,
+        IssueColumn::Milestone,
+        IssueColumn::Points,
+        IssueColumn::Assignee,
+        IssueColumn::Priority,
+        IssueColumn::State,
+        IssueColumn::Date,
+        IssueColumn::Closed,
+        IssueColumn::Id,
+    ] {
+        if issue_columns_min_width_with_title(&columns, ISSUE_TABLE_MIN_TITLE_WIDTH) <= width {
+            break;
+        }
+        if let Some(idx) = columns.iter().position(|column| *column == removable) {
+            columns.remove(idx);
+        }
+    }
+
+    columns
+}
+
+fn issue_columns_min_width_with_title(columns: &[IssueColumn], title_width: usize) -> usize {
+    let fixed = columns
+        .iter()
+        .map(|column| column.fixed_width().unwrap_or(title_width))
+        .sum::<usize>();
+    fixed + columns.len().saturating_sub(1)
+}
+
+fn issue_column_widths(columns: &[IssueColumn], width: usize) -> Vec<usize> {
+    let fixed = columns
+        .iter()
+        .filter_map(|column| column.fixed_width())
+        .sum::<usize>();
+    let gaps = columns.len().saturating_sub(1);
+    let title_width = width.saturating_sub(fixed + gaps).max(1);
+    columns
+        .iter()
+        .map(|column| column.fixed_width().unwrap_or(title_width))
+        .collect()
+}
+
+fn issue_table_header(columns: &[IssueColumn], widths: &[usize], width: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(
+        " ".repeat(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL)),
+    )];
+    for (idx, (column, column_width)) in columns.iter().zip(widths).enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            fit_display(column.label(), *column_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    Line::from(spans)
+}
+
+fn ticket_table_line(
+    ticket: &Ticket,
+    columns: &[IssueColumn],
+    widths: &[usize],
+    width: usize,
+    _compact: bool,
+    current_user: &str,
+    closed_at: Option<OffsetDateTime>,
+    has_writeups: bool,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (idx, (column, column_width)) in columns.iter().zip(widths).enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+        match column {
+            IssueColumn::Id => push_issue_id_column(
+                &mut spans,
+                ticket,
+                *column_width,
+                ticket.assigned.as_deref() == Some(current_user),
+            ),
+            IssueColumn::Tags => push_issue_tags_column(&mut spans, &ticket.tags, *column_width),
+            _ => {
+                let (value, style) = issue_column_value(ticket, *column, closed_at, current_user);
+                spans.push(Span::styled(fit_display(&value, *column_width), style));
+            }
+        }
+    }
+
+    if has_writeups {
+        push_right_indicator(
+            &mut spans,
+            Some(("[w]".to_string(), Style::default().fg(Color::Yellow))),
+            width,
+        );
+    }
+
+    Line::from(spans)
+}
+
+fn push_issue_id_column(
+    spans: &mut Vec<Span<'static>>,
+    ticket: &Ticket,
+    width: usize,
+    assigned_to_current_user: bool,
+) {
+    let short_id = ticket
+        .short_id()
+        .chars()
+        .take(LIST_ID_WIDTH)
+        .collect::<String>();
+    let id = truncate_display(&short_id, width);
+    let id_width = UnicodeWidthStr::width(id.as_str());
+    let star_width = width.saturating_sub(id_width).min(1);
+    let star = if assigned_to_current_user { "*" } else { " " };
+    let padding_width = width.saturating_sub(id_width + star_width);
+
+    spans.push(Span::styled(id, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+        truncate_display(star, star_width),
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    ));
+    if padding_width > 0 {
+        spans.push(Span::raw(" ".repeat(padding_width)));
+    }
+}
+
+fn push_issue_tags_column(spans: &mut Vec<Span<'static>>, tags: &BTreeSet<String>, width: usize) {
+    let tag_spans = tag_spans(tags, width);
+    let tag_width = spans_width(&tag_spans);
+    spans.extend(tag_spans);
+    if tag_width < width {
+        spans.push(Span::raw(" ".repeat(width - tag_width)));
+    }
+}
+
+fn issue_column_value(
+    ticket: &Ticket,
+    column: IssueColumn,
+    closed_at: Option<OffsetDateTime>,
+    current_user: &str,
+) -> (String, Style) {
+    match column {
+        IssueColumn::Id => (
+            ticket.short_id().chars().take(LIST_ID_WIDTH).collect(),
+            Style::default().fg(Color::DarkGray),
+        ),
+        IssueColumn::Date => (
+            relative_time(ticket.created_at, OffsetDateTime::now_utc()),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        IssueColumn::Closed => (
+            closed_at
+                .map(|at| relative_time(at, OffsetDateTime::now_utc()))
+                .unwrap_or_default(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        IssueColumn::Priority => (
+            ticket
+                .priority
+                .map(|priority| format!("p{priority}"))
+                .unwrap_or_default(),
+            Style::default().fg(Color::Magenta),
+        ),
+        IssueColumn::State => (
+            state_abbrev(ticket.state).to_string(),
+            state_abbrev_style(ticket.state),
+        ),
+        IssueColumn::Title => (
+            flatten_display(&ticket.title),
+            Style::default().fg(Color::Reset),
+        ),
+        IssueColumn::Assignee => (
+            ticket
+                .assigned
+                .as_deref()
+                .map(short_assignee)
+                .unwrap_or_default(),
+            if ticket.assigned.as_deref() == Some(current_user) {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ),
+        IssueColumn::Points => (
+            ticket
+                .points
+                .map(|points| points.to_string())
+                .unwrap_or_default(),
+            Style::default().fg(Color::LightBlue),
+        ),
+        IssueColumn::Milestone => (
+            ticket.milestone.clone().unwrap_or_default(),
+            Style::default().fg(Color::LightCyan),
+        ),
+        IssueColumn::Tags => (
+            ticket.tags.iter().cloned().collect::<Vec<_>>().join(","),
+            Style::default().fg(Color::Yellow),
+        ),
+    }
+}
+
+fn short_assignee(assignee: &str) -> String {
+    assignee
+        .split_once('@')
+        .map(|(local, _)| local)
+        .unwrap_or(assignee)
+        .to_string()
+}
+
 fn writeup_list_line(writeup: &Writeup, width: usize, compact: bool) -> Line<'static> {
     let short_id = writeup
         .short_id()
@@ -4989,7 +5603,7 @@ fn writeup_list_line(writeup: &Writeup, width: usize, compact: bool) -> Line<'st
     let meta = vec![
         (
             fit_display(
-                &relative_date(writeup_recent_at(writeup), OffsetDateTime::now_utc()),
+                &relative_time(writeup_recent_at(writeup), OffsetDateTime::now_utc()),
                 LIST_AGE_WIDTH,
             ),
             Style::default()
@@ -5033,6 +5647,317 @@ fn writeup_list_line(writeup: &Writeup, width: usize, compact: bool) -> Line<'st
         width,
         issue_indicator,
     )
+}
+
+struct DashboardStats {
+    total: usize,
+    open: usize,
+    closed: usize,
+    with_comments: usize,
+    created_7d: usize,
+    states: Vec<(String, usize)>,
+    tags: Vec<(String, usize)>,
+    assignees: Vec<(String, usize)>,
+    recently_opened: Vec<(uuid::Uuid, String)>,
+    closed_tickets: Vec<(uuid::Uuid, OffsetDateTime, String)>,
+}
+
+impl DashboardStats {
+    fn from_tickets(tickets: &[Ticket]) -> Self {
+        let now = OffsetDateTime::now_utc();
+        let week_ago = now - time::Duration::days(7);
+        let mut open = 0;
+        let mut closed = 0;
+        let mut with_comments = 0;
+        let mut created_7d = 0;
+        let mut states = BTreeMap::<String, usize>::new();
+        let mut tags = BTreeMap::<String, usize>::new();
+        let mut assignees = BTreeMap::<String, usize>::new();
+        let mut recently_opened = Vec::new();
+        let mut closed_tickets = Vec::new();
+
+        for ticket in tickets {
+            match ticket.status {
+                TicketStatus::Open => open += 1,
+                TicketStatus::Closed => {
+                    closed += 1;
+                    closed_tickets.push((ticket.id, ticket.created_at, ticket.title.clone()));
+                }
+            }
+            if !ticket.comments.is_empty() {
+                with_comments += 1;
+            }
+            if ticket.created_at >= week_ago {
+                created_7d += 1;
+            }
+            *states.entry(ticket.state.as_str().to_string()).or_default() += 1;
+            for tag in &ticket.tags {
+                *tags.entry(tag.clone()).or_default() += 1;
+            }
+            if let Some(assigned) = &ticket.assigned {
+                *assignees.entry(short_assignee(assigned)).or_default() += 1;
+            }
+            recently_opened.push((ticket.id, ticket.title.clone()));
+        }
+
+        let sort_counts = |map: BTreeMap<String, usize>| {
+            let mut values = map.into_iter().collect::<Vec<_>>();
+            values.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            values
+        };
+        recently_opened.sort_by(|a, b| {
+            ticket_created_at(tickets, b.0)
+                .cmp(&ticket_created_at(tickets, a.0))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        Self {
+            total: tickets.len(),
+            open,
+            closed,
+            with_comments,
+            created_7d,
+            states: sort_counts(states),
+            tags: sort_counts(tags),
+            assignees: sort_counts(assignees),
+            recently_opened,
+            closed_tickets,
+        }
+    }
+}
+
+fn ticket_created_at(tickets: &[Ticket], id: uuid::Uuid) -> OffsetDateTime {
+    tickets
+        .iter()
+        .find(|ticket| ticket.id == id)
+        .map(|ticket| ticket.created_at)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+}
+
+fn dashboard_lines(
+    stats: &DashboardStats,
+    closed_at: &HashMap<uuid::Uuid, OffsetDateTime>,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    if stats.total == 0 {
+        return vec![Line::from(Span::styled(
+            "No tickets.",
+            Style::default().fg(Color::DarkGray),
+        ))];
+    }
+
+    let now = OffsetDateTime::now_utc();
+    let week_ago = now - time::Duration::days(7);
+    let mut recently_closed = stats
+        .closed_tickets
+        .iter()
+        .map(|(id, fallback, title)| {
+            let closed = closed_at.get(id).copied().unwrap_or(*fallback);
+            (*id, closed, title.clone())
+        })
+        .collect::<Vec<_>>();
+    recently_closed.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let closed_7d = recently_closed
+        .iter()
+        .filter(|(_, closed, _)| *closed >= week_ago)
+        .count();
+
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            stats.total.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" tickets  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            stats.open.to_string(),
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" open  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            stats.closed.to_string(),
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" closed", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("  {} with comments", stats.with_comments),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("+{}", stats.created_7d),
+            Style::default().fg(Color::LightGreen),
+        ),
+        Span::styled(" opened  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("-{closed_7d}"),
+            Style::default().fg(Color::LightRed),
+        ),
+        Span::styled(
+            " closed in the last 7d",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::raw(""));
+
+    push_count_section(
+        &mut lines,
+        "States",
+        &stats.states,
+        Color::Cyan,
+        width,
+        height,
+    );
+    push_count_section(
+        &mut lines,
+        "Top Tags",
+        &stats.tags,
+        Color::Magenta,
+        width,
+        height,
+    );
+    push_count_section(
+        &mut lines,
+        "Assignees",
+        &stats.assignees,
+        Color::LightGreen,
+        width,
+        height,
+    );
+    push_ticket_section(
+        &mut lines,
+        "Recently Opened",
+        &stats
+            .recently_opened
+            .iter()
+            .map(|(id, title)| (*id, title.clone()))
+            .collect::<Vec<_>>(),
+        Color::LightGreen,
+        width,
+        height,
+    );
+    push_ticket_section(
+        &mut lines,
+        "Recently Closed",
+        &recently_closed
+            .iter()
+            .map(|(id, _, title)| (*id, title.clone()))
+            .collect::<Vec<_>>(),
+        Color::LightRed,
+        width,
+        height,
+    );
+
+    lines.truncate(height.max(1));
+    lines
+}
+
+fn push_count_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    rows: &[(String, usize)],
+    color: Color,
+    width: usize,
+    height: usize,
+) {
+    if rows.is_empty() || lines.len() + 3 > height {
+        return;
+    }
+    let remaining = height.saturating_sub(lines.len() + 2);
+    if remaining == 0 {
+        return;
+    }
+    let limit = rows.len().min(remaining.min(5));
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )));
+    let max = rows.iter().map(|(_, count)| *count).max().unwrap_or(1);
+    let bar_width = width.saturating_sub(22).min(28);
+    for (label, count) in rows.iter().take(limit) {
+        lines.push(count_line(label, *count, max, color, bar_width));
+    }
+    if rows.len() > limit && lines.len() < height {
+        lines.push(Line::from(Span::styled(
+            format!("... and {} more", rows.len() - limit),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if lines.len() < height {
+        lines.push(Line::raw(""));
+    }
+}
+
+fn count_line(
+    label: &str,
+    count: usize,
+    max: usize,
+    color: Color,
+    bar_width: usize,
+) -> Line<'static> {
+    let filled = if max == 0 || bar_width == 0 {
+        0
+    } else {
+        ((count as f64 / max as f64) * bar_width as f64)
+            .round()
+            .max(1.0) as usize
+    }
+    .min(bar_width);
+    Line::from(vec![
+        Span::styled(fit_display(label, 14), Style::default().fg(color)),
+        Span::raw(" "),
+        Span::styled(format!("{count:>3}"), Style::default().fg(Color::Gray)),
+        Span::raw(" "),
+        Span::styled(" ".repeat(filled), Style::default().bg(color)),
+    ])
+}
+
+fn push_ticket_section(
+    lines: &mut Vec<Line<'static>>,
+    title: &'static str,
+    rows: &[(uuid::Uuid, String)],
+    color: Color,
+    width: usize,
+    height: usize,
+) {
+    if rows.is_empty() || lines.len() + 3 > height {
+        return;
+    }
+    let remaining = height.saturating_sub(lines.len() + 2);
+    if remaining == 0 {
+        return;
+    }
+    let limit = rows.len().min(remaining.min(5));
+    lines.push(Line::from(Span::styled(
+        title,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )));
+    let title_width = width.saturating_sub(10);
+    for (id, title) in rows.iter().take(limit) {
+        let short = id.to_string().chars().take(6).collect::<String>();
+        lines.push(Line::from(vec![
+            Span::styled(short, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::raw(truncate_display(&flatten_display(title), title_width)),
+        ]));
+    }
+    if rows.len() > limit && lines.len() < height {
+        lines.push(Line::from(Span::styled(
+            format!("... and {} more", rows.len() - limit),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if lines.len() < height {
+        lines.push(Line::raw(""));
+    }
 }
 
 fn writeup_recent_at(writeup: &Writeup) -> OffsetDateTime {
@@ -5263,7 +6188,7 @@ fn list_meta_display(ticket: &Ticket) -> Vec<(String, Style)> {
     vec![
         (
             fit_display(
-                &relative_date(ticket.created_at, OffsetDateTime::now_utc()),
+                &relative_time(ticket.created_at, OffsetDateTime::now_utc()),
                 LIST_AGE_WIDTH,
             ),
             Style::default()
@@ -5456,6 +6381,7 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
                 status: Some("open".to_string()),
                 subissues: true,
                 tag_match_all: true,
+                columns: default_issue_column_names(),
                 ..Default::default()
             },
             kind: ViewKind::BuiltIn,
@@ -5467,6 +6393,7 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
                 assigned: Some(current_user.to_string()),
                 subissues: true,
                 tag_match_all: true,
+                columns: default_issue_column_names(),
                 ..Default::default()
             },
             kind: ViewKind::BuiltIn,
@@ -5475,9 +6402,16 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
             name: "Recently Closed".to_string(),
             view: SavedView {
                 status: Some("closed".to_string()),
-                order: Some("created.desc".to_string()),
+                order: Some("closed.desc".to_string()),
                 subissues: true,
                 tag_match_all: true,
+                columns: vec![
+                    "id".to_string(),
+                    "closed".to_string(),
+                    "state".to_string(),
+                    "priority".to_string(),
+                    "title".to_string(),
+                ],
                 ..Default::default()
             },
             kind: ViewKind::BuiltIn,
@@ -5488,11 +6422,137 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
                 all: true,
                 subissues: true,
                 tag_match_all: true,
+                columns: default_issue_column_names(),
                 ..Default::default()
             },
             kind: ViewKind::BuiltIn,
         },
     ]
+}
+
+fn default_issue_columns() -> Vec<IssueColumn> {
+    vec![
+        IssueColumn::Id,
+        IssueColumn::Date,
+        IssueColumn::State,
+        IssueColumn::Priority,
+        IssueColumn::Title,
+        IssueColumn::Tags,
+    ]
+}
+
+fn default_issue_column_names() -> Vec<String> {
+    default_issue_columns()
+        .into_iter()
+        .map(|column| column.as_str().to_string())
+        .collect()
+}
+
+fn saved_issue_columns(view: &SavedView) -> Vec<IssueColumn> {
+    let mut columns = view
+        .columns
+        .iter()
+        .filter_map(|column| IssueColumn::parse(column))
+        .collect::<Vec<_>>();
+    if columns.is_empty() {
+        columns = default_issue_columns();
+    }
+    if !columns.contains(&IssueColumn::Title) {
+        columns.push(IssueColumn::Title);
+    }
+    columns
+}
+
+impl IssueColumn {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "id" | "ticid" => Some(Self::Id),
+            "date" | "created" | "dt" => Some(Self::Date),
+            "closed" | "closed_at" | "closed-at" => Some(Self::Closed),
+            "priority" | "prio" | "p" => Some(Self::Priority),
+            "state" => Some(Self::State),
+            "title" => Some(Self::Title),
+            "assignee" | "assigned" => Some(Self::Assignee),
+            "points" | "pts" => Some(Self::Points),
+            "milestone" => Some(Self::Milestone),
+            "tags" => Some(Self::Tags),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Date => "date",
+            Self::Closed => "closed",
+            Self::Priority => "priority",
+            Self::State => "state",
+            Self::Title => "title",
+            Self::Assignee => "assignee",
+            Self::Points => "points",
+            Self::Milestone => "milestone",
+            Self::Tags => "tags",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Id => "Id",
+            Self::Date => "Dt",
+            Self::Closed => "Cls",
+            Self::Priority => "P",
+            Self::State => "St",
+            Self::Title => "Title",
+            Self::Assignee => "Assignee",
+            Self::Points => "Pts",
+            Self::Milestone => "Milestone",
+            Self::Tags => "Tags",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Id => "ticket id and claimed marker",
+            Self::Date => "created relative date",
+            Self::Closed => "closed relative date",
+            Self::Priority => "priority",
+            Self::State => "lifecycle state",
+            Self::Title => "ticket title",
+            Self::Assignee => "assigned user",
+            Self::Points => "estimate points",
+            Self::Milestone => "milestone",
+            Self::Tags => "colored tags",
+        }
+    }
+
+    fn fixed_width(self) -> Option<usize> {
+        match self {
+            Self::Id => Some(LIST_ID_WIDTH + 1),
+            Self::Date | Self::Closed => Some(LIST_AGE_WIDTH),
+            Self::Priority => Some(LIST_PRIORITY_WIDTH),
+            Self::State => Some(LIST_STATE_WIDTH),
+            Self::Title => None,
+            Self::Assignee => Some(8),
+            Self::Points => Some(3),
+            Self::Milestone => Some(10),
+            Self::Tags => Some(20),
+        }
+    }
+}
+
+fn issue_column_index(column: IssueColumn) -> usize {
+    ISSUE_COLUMN_CHOICES
+        .iter()
+        .position(|candidate| *candidate == column)
+        .unwrap_or(usize::MAX)
+}
+
+fn issue_columns_label(columns: &[IssueColumn]) -> String {
+    columns
+        .iter()
+        .map(|column| column.label())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn optional_trimmed(raw: &str) -> Option<&str> {
@@ -5521,7 +6581,7 @@ fn github_author(description: &str) -> Option<&str> {
 }
 
 fn comment_summary_line(comment: &Comment, width: usize) -> Line<'static> {
-    let date = relative_date(comment.at, OffsetDateTime::now_utc());
+    let date = relative_time(comment.at, OffsetDateTime::now_utc());
     let author = comment_author_display(&comment.author);
     let prefix_width =
         UnicodeWidthStr::width(date.as_str()) + 2 + UnicodeWidthStr::width(author.as_str()) + 2;
@@ -5625,7 +6685,7 @@ fn writeup_metadata_lines(writeup: &Writeup, width: usize) -> Vec<Line<'static>>
             label: "Updated",
             value: format!(
                 "{} ago",
-                relative_date(writeup_recent_at(writeup), OffsetDateTime::now_utc())
+                relative_time(writeup_recent_at(writeup), OffsetDateTime::now_utc())
             ),
         },
         MetadataField {
@@ -5898,23 +6958,6 @@ fn status_state_line(ticket: &Ticket) -> Line<'static> {
     ])
 }
 
-fn relative_date(then: OffsetDateTime, now: OffsetDateTime) -> String {
-    let seconds = (now - then).whole_seconds().max(0);
-    if seconds < 60 * 60 {
-        return "0d".to_string();
-    }
-    if seconds < 60 * 60 * 24 {
-        return format!("{}h", seconds / (60 * 60));
-    }
-    if seconds < 60 * 60 * 24 * 30 {
-        return format!("{}d", seconds / (60 * 60 * 24));
-    }
-    if seconds < 60 * 60 * 24 * 365 {
-        return format!("{}mo", seconds / (60 * 60 * 24 * 30));
-    }
-    format!("{}y", seconds / (60 * 60 * 24 * 365))
-}
-
 fn new_ticket_field_line(
     field: NewTicketField,
     active: NewTicketField,
@@ -5965,4 +7008,88 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
         ])
         .split(popup_layout[1]);
     horizontal[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn saved_issue_columns_fall_back_to_default_and_keep_title() {
+        let default = saved_issue_columns(&SavedView::default());
+        assert_eq!(default, default_issue_columns());
+
+        let custom = saved_issue_columns(&SavedView {
+            columns: vec!["closed".to_string(), "priority".to_string()],
+            ..Default::default()
+        });
+        assert_eq!(
+            custom,
+            vec![
+                IssueColumn::Closed,
+                IssueColumn::Priority,
+                IssueColumn::Title
+            ]
+        );
+    }
+
+    #[test]
+    fn issue_columns_drop_optional_fields_to_fit_width() {
+        let columns = vec![
+            IssueColumn::Id,
+            IssueColumn::Closed,
+            IssueColumn::Priority,
+            IssueColumn::Title,
+            IssueColumn::Tags,
+        ];
+
+        assert_eq!(issue_columns_for_width(&columns, 80), columns);
+        assert_eq!(
+            issue_columns_for_width(&columns, 43),
+            vec![
+                IssueColumn::Id,
+                IssueColumn::Closed,
+                IssueColumn::Priority,
+                IssueColumn::Title
+            ]
+        );
+        assert_eq!(
+            issue_columns_for_width(&columns, 38),
+            vec![IssueColumn::Id, IssueColumn::Title]
+        );
+        assert_eq!(
+            issue_columns_for_width(&columns, 3),
+            vec![IssueColumn::Title]
+        );
+    }
+
+    #[test]
+    fn recently_closed_builtin_uses_closed_column_and_order() {
+        let views = builtin_views("me@example.com");
+        let recent = views
+            .iter()
+            .find(|view| view.name == "Recently Closed")
+            .unwrap();
+
+        assert_eq!(recent.view.order.as_deref(), Some("closed.desc"));
+        assert!(recent.view.columns.contains(&"closed".to_string()));
+        assert!(!recent.view.columns.contains(&"date".to_string()));
+    }
+
+    #[test]
+    fn id_column_reserves_space_for_claimed_marker() {
+        assert_eq!(IssueColumn::Id.fixed_width(), Some(4));
+    }
+
+    #[test]
+    fn tag_column_uses_colored_tag_spans() {
+        let mut tags = BTreeSet::new();
+        tags.insert("bug".to_string());
+
+        let mut spans = Vec::new();
+        push_issue_tags_column(&mut spans, &tags, 8);
+
+        assert_eq!(spans_width(&spans), 8);
+        assert!(spans.iter().any(|span| span.content.as_ref() == "bug"));
+    }
 }

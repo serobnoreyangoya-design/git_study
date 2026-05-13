@@ -6,7 +6,7 @@ use crate::commands::{open_store, SessionGitDir};
 use crate::render;
 use crate::session_state::{SavedView, State};
 
-#[derive(Debug, Default, Parser)]
+#[derive(Debug, Parser)]
 pub struct Args {
     /// Load a saved view by name.
     pub view: Option<String>,
@@ -22,6 +22,10 @@ pub struct Args {
     /// Show all tickets, without the default open-only filter or limit.
     #[arg(long = "all")]
     pub all: bool,
+
+    /// Show all open tickets, without terminal-height truncation.
+    #[arg(long = "open", conflicts_with_all = ["all", "status", "state", "limit"])]
+    pub open: bool,
 
     /// Show only tickets with this tag.
     #[arg(short = 'g', long = "tag")]
@@ -51,8 +55,8 @@ pub struct Args {
     #[arg(long = "subissues")]
     pub subissues: bool,
 
-    /// Maximum number of tickets to show.
-    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    /// Maximum number of tickets to show. Defaults to available terminal rows.
+    #[arg(short = 'n', long = "limit", default_value_t = 0)]
     pub limit: usize,
 
     /// Output as JSON.
@@ -62,6 +66,28 @@ pub struct Args {
     /// Output as Markdown.
     #[arg(long = "markdown", conflicts_with = "json")]
     pub markdown: bool,
+}
+
+impl Default for Args {
+    fn default() -> Self {
+        Self {
+            view: None,
+            state: None,
+            status: None,
+            all: false,
+            open: false,
+            tag: Vec::new(),
+            tag_mode: "all".to_string(),
+            assigned: None,
+            only_tagged: false,
+            search: None,
+            order: None,
+            subissues: false,
+            limit: 0,
+            json: false,
+            markdown: false,
+        }
+    }
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -81,6 +107,7 @@ pub fn run(args: Args) -> Result<()> {
             state: saved.state.clone(),
             status: saved.status.clone(),
             all: saved.all,
+            open: false,
             tag: saved_tags(&saved),
             tag_mode: if saved.tag_match_all { "all" } else { "any" }.to_string(),
             assigned: saved.assigned.clone(),
@@ -88,7 +115,7 @@ pub fn run(args: Args) -> Result<()> {
             search: saved.search.clone(),
             order: saved.order.clone(),
             subissues: saved.subissues,
-            limit: if saved.limit > 0 { saved.limit } else { 20 },
+            limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
         }
@@ -138,9 +165,20 @@ pub fn run(args: Args) -> Result<()> {
         hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
-    if !args.all && args.limit > 0 {
-        tickets.truncate(args.limit);
+    let total = tickets.len();
+    let limit = if args.all || args.open {
+        0
+    } else if args.limit > 0 {
+        args.limit
+    } else if args.json || args.markdown {
+        20
+    } else {
+        terminal_table_limit(total)
+    };
+    if !args.all && limit > 0 {
+        tickets.truncate(limit);
     }
+    let omitted = total.saturating_sub(tickets.len());
 
     // Save last-used filters so `ti views save` can recall them.
     if args.view.is_none() {
@@ -158,6 +196,7 @@ pub fn run(args: Args) -> Result<()> {
             all: args.all,
             subissues: args.subissues,
             limit: args.limit,
+            columns: Vec::new(),
         };
         if let Ok(mut session_state) = State::load() {
             session_state.set_last_filters(&git_dir, saved);
@@ -184,16 +223,29 @@ pub fn run(args: Args) -> Result<()> {
     let current = session_state.current_for(&git_dir);
     let users = store.list_users().unwrap_or_default();
     let nicks = render::build_nick_map(&users);
-    println!(
-        "{}",
-        render::tickets_table_with_refs(
-            &tickets,
-            current.as_ref(),
-            &open_ref_lengths,
-            Some(&nicks)
-        )
+    let mut table = render::tickets_table_with_refs(
+        &tickets,
+        current.as_ref(),
+        &open_ref_lengths,
+        Some(&nicks),
     );
+    if omitted > 0 {
+        table.push_str(&format!("... and {omitted} more open issues\n"));
+    }
+    print!("{table}");
     Ok(())
+}
+
+fn terminal_table_limit(total: usize) -> usize {
+    let rows = crossterm::terminal::size()
+        .map(|(_, rows)| rows as usize)
+        .unwrap_or(24);
+    table_limit_for_rows(total, rows)
+}
+
+fn table_limit_for_rows(total: usize, rows: usize) -> usize {
+    let reserved = if total > rows.saturating_sub(2) { 3 } else { 2 };
+    rows.saturating_sub(reserved).max(1)
 }
 
 fn saved_tags(saved: &SavedView) -> Vec<String> {
@@ -201,4 +253,16 @@ fn saved_tags(saved: &SavedView) -> Vec<String> {
         return saved.tags.clone();
     }
     saved.tag.iter().cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_limit_reserves_footer_only_when_rows_are_omitted() {
+        assert_eq!(table_limit_for_rows(3, 10), 8);
+        assert_eq!(table_limit_for_rows(10, 10), 7);
+        assert_eq!(table_limit_for_rows(10, 2), 1);
+    }
 }

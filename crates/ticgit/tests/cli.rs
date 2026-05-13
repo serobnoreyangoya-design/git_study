@@ -87,6 +87,26 @@ fn editor_script(repo: &TestRepo, contents: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn capturing_editor_script(repo: &TestRepo, captured: &Path, contents: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = repo.state_file.path().join("capturing-editor.sh");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncp \"$1\" \"{}\"\ncat > \"$1\" <<'EOF'\n{contents}\nEOF\n",
+            captured.display()
+        ),
+    )
+    .expect("write capturing editor script");
+
+    let mut permissions = fs::metadata(&path).expect("editor metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("chmod editor script");
+    path
+}
+
+#[cfg(unix)]
 fn executable_script(dir: &Path, name: &str, contents: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -130,6 +150,48 @@ fn agent_prints_markdown_guide() {
         .stdout(predicate::str::contains("Prefer `--markdown`"))
         .stdout(predicate::str::contains("ti close -t <id>"))
         .stdout(predicate::str::contains("--json").not());
+}
+
+#[test]
+fn agent_skill_installs_local_shared_skill_and_checks_it() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".agents/skills/ticgit/SKILL.md"));
+
+    let skill = fs::read_to_string(repo.dir.path().join(".agents/skills/ticgit/SKILL.md"))
+        .expect("skill file");
+    assert!(skill.contains("name: ticgit"));
+    assert!(skill.contains("# TicGit Agent Guide"));
+    assert!(skill.contains("ti list --markdown"));
+
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-local", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed and current"));
+}
+
+#[test]
+fn agent_skill_installs_agents_md_idempotently() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-md"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-md"])
+        .assert()
+        .success();
+
+    let agents = fs::read_to_string(repo.dir.path().join("AGENTS.md")).expect("AGENTS.md");
+    assert_eq!(agents.matches("<!-- ticgit-agent-start -->").count(), 1);
+    assert!(agents.contains("This project uses TicGit"));
+    assert!(agents.contains("Run `ti agent`"));
 }
 
 #[test]
@@ -313,6 +375,48 @@ fn help_lists_sync_and_pull_but_not_push() {
         .stdout(predicate::str::contains("sync"))
         .stdout(predicate::str::contains("pull"))
         .stdout(predicate::str::contains(" push ").not());
+}
+
+#[test]
+fn bare_ti_defaults_to_list() {
+    let repo = TestRepo::new();
+    create_ticket(&repo, "bare ti");
+
+    repo.ti()
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("bare ti"))
+        .stderr(predicate::str::contains("unknown tag mode").not());
+}
+
+#[test]
+fn list_open_shows_all_open_tickets_without_default_truncation() {
+    let repo = TestRepo::new();
+    for i in 0..25 {
+        create_ticket(&repo, &format!("open ticket {i}"));
+    }
+
+    let default_output = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_list: Value = serde_json::from_slice(&default_output).unwrap();
+    assert_eq!(default_list.as_array().unwrap().len(), 20);
+
+    let open_output = repo
+        .ti()
+        .args(["list", "--open", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let open_list: Value = serde_json::from_slice(&open_output).unwrap();
+    assert_eq!(open_list.as_array().unwrap().len(), 25);
 }
 
 #[test]
@@ -516,6 +620,36 @@ fn edit_updates_title_and_description() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["title"], "new title");
     assert_eq!(json["description"], "new description\nsecond line");
+}
+
+#[test]
+#[cfg(unix)]
+fn comment_editor_prompt_includes_ticket_title() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "prompt title");
+    let captured = repo.state_file.path().join("comment-template.md");
+    let editor = capturing_editor_script(&repo, &captured, "edited body\n");
+
+    repo.ti()
+        .env("GIT_EDITOR", &editor)
+        .args(["comment", "-t", &id, "--edit"])
+        .assert()
+        .success();
+
+    let template = fs::read_to_string(captured).unwrap();
+    assert!(template.contains("# Ticket comment"));
+    assert!(template.contains("# Ticket: prompt title"));
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["comments"][0]["body"], "edited body");
 }
 
 #[test]
