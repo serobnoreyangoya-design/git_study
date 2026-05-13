@@ -1,9 +1,19 @@
-# TicGit
+# ticgit
 
-TicGit is a Git-native issue tracker. Tickets live in the repository as
-structured [git-meta](https://crates.io/crates/git-meta-lib) metadata instead of
-files on an orphan branch.
+Ticgit is a Git-native issue tracker. Tickets live in the repository as
+structured [git-meta](https://crates.io/crates/git-meta-lib) metadata.
 
+The `ti` cli can create, read, update and sync ticket data.
+
+<img width="2362" height="1712" alt="CleanShot 2026-05-13 at 09 47 31@2x" src="https://github.com/user-attachments/assets/f5ff1a77-644d-47ba-80eb-77e7b7ee66cb" />
+
+Also ships with `ti tui` for a cool TUI version.
+
+<img width="2590" height="1730" alt="CleanShot 2026-05-13 at 09 45 20@2x" src="https://github.com/user-attachments/assets/8c648b6a-0c13-4234-a11b-963fff4a7a2f" />
+
+<img width="2590" height="1730" alt="CleanShot 2026-05-13 at 09 45 43@2x" src="https://github.com/user-attachments/assets/391b0f79-c487-4146-b7b8-a39fad2cde93" />
+
+Everything has `--json` output for scripting and `--markdown` output for agentic use. You can also train your agent to use it by asking it to run `ti agent`. 
 
 ## Install
 
