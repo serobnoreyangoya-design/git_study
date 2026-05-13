@@ -14,6 +14,8 @@ pub struct Filter {
     pub status: Option<TicketStatus>,
     pub state: Option<TicketState>,
     pub tag: Option<String>,
+    pub tags: Vec<String>,
+    pub tag_match_all: bool,
     pub assigned: Option<String>,
     pub only_tagged: bool,
     pub search: Option<SearchFilter>,
@@ -40,6 +42,7 @@ pub enum SearchScope {
 /// `desc` flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
+    Priority,
     Title,
     State,
     Assigned,
@@ -55,6 +58,7 @@ pub struct SortOrder {
 impl SortKey {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "priority" | "prio" => Some(SortKey::Priority),
             "title" => Some(SortKey::Title),
             "state" => Some(SortKey::State),
             "assigned" => Some(SortKey::Assigned),
@@ -160,8 +164,14 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
                     return false;
                 }
             }
-            if let Some(tag) = &filter.tag {
-                if !t.tags.contains(tag) {
+            let tags = filter_tags(filter);
+            if !tags.is_empty() {
+                let matches = if filter.tag_match_all {
+                    tags.iter().all(|tag| t.tags.contains(*tag))
+                } else {
+                    tags.iter().any(|tag| t.tags.contains(*tag))
+                };
+                if !matches {
                     return false;
                 }
             }
@@ -206,6 +216,19 @@ pub fn apply(tickets: Vec<Ticket>, filter: &Filter) -> Vec<Ticket> {
     tickets
 }
 
+fn filter_tags(filter: &Filter) -> Vec<&String> {
+    let mut tags = Vec::new();
+    if let Some(tag) = &filter.tag {
+        tags.push(tag);
+    }
+    for tag in &filter.tags {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
 fn contains(haystack: &str, needle: &str) -> bool {
     haystack.to_ascii_lowercase().contains(needle)
 }
@@ -242,6 +265,10 @@ fn status_rank(s: TicketStatus) -> u8 {
 
 fn compare(a: &Ticket, b: &Ticket, key: SortKey, desc: bool) -> Ordering {
     let ord = match key {
+        SortKey::Priority => priority_rank(a.priority)
+            .cmp(&priority_rank(b.priority))
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id)),
         SortKey::Title => a.title.cmp(&b.title),
         SortKey::State => status_rank(a.status)
             .cmp(&status_rank(b.status))
@@ -288,6 +315,7 @@ mod tests {
             status,
             state,
             assigned: assigned.map(String::from),
+            closed_by: None,
             priority: None,
             points: None,
             milestone: None,
@@ -375,6 +403,73 @@ mod tests {
         let out = apply(input, &f);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title, "b");
+    }
+
+    #[test]
+    fn filter_by_any_tag() {
+        let mut bug = t(
+            "bug",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("bug"),
+            None,
+            1,
+        );
+        bug.tags.insert("cli".into());
+        let ui = t(
+            "ui",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("ui"),
+            None,
+            2,
+        );
+        let docs = t(
+            "docs",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("docs"),
+            None,
+            3,
+        );
+        let f = Filter {
+            tags: vec!["bug".into(), "ui".into()],
+            tag_match_all: false,
+            ..Default::default()
+        };
+        let out = apply(vec![bug, ui, docs], &f);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].title, "ui");
+        assert_eq!(out[1].title, "bug");
+    }
+
+    #[test]
+    fn filter_by_all_tags() {
+        let mut both = t(
+            "both",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("bug"),
+            None,
+            1,
+        );
+        both.tags.insert("ui".into());
+        let bug = t(
+            "bug",
+            TicketStatus::Open,
+            TicketState::New,
+            Some("bug"),
+            None,
+            2,
+        );
+        let f = Filter {
+            tags: vec!["bug".into(), "ui".into()],
+            tag_match_all: true,
+            ..Default::default()
+        };
+        let out = apply(vec![both, bug], &f);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "both");
     }
 
     #[test]

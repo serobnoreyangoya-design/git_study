@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -26,17 +27,36 @@ pub struct State {
     /// Map of canonicalised git-dir path → named saved views.
     #[serde(default)]
     pub views: HashMap<String, HashMap<String, SavedView>>,
+    /// Map of canonicalised git-dir path → per-user project UI settings.
+    #[serde(default)]
+    pub project_settings: HashMap<String, ProjectSettings>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_width_percent: Option<u16>,
 }
 
 /// A saved set of list filter parameters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SavedView {
+    #[serde(
+        default,
+        with = "time::serde::rfc3339::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub created_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub tag_match_all: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub assigned: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -55,6 +75,14 @@ pub struct SavedView {
 
 fn is_false(v: &bool) -> bool {
     !v
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn is_zero(v: &usize) -> bool {
@@ -118,7 +146,10 @@ impl State {
         self.last_filters.get(&key_for(git_dir))
     }
 
-    pub fn save_view(&mut self, git_dir: &Path, name: &str, view: SavedView) {
+    pub fn save_view(&mut self, git_dir: &Path, name: &str, mut view: SavedView) {
+        if view.created_at.is_none() {
+            view.created_at = Some(OffsetDateTime::now_utc());
+        }
         self.views
             .entry(key_for(git_dir))
             .or_default()
@@ -141,10 +172,25 @@ impl State {
             .get(&key_for(git_dir))
             .map(|m| {
                 let mut v: Vec<_> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                v.sort_by(|a, b| a.0.cmp(&b.0));
+                v.sort_by(|a, b| {
+                    b.1.created_at
+                        .cmp(&a.1.created_at)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
                 v
             })
             .unwrap_or_default()
+    }
+
+    pub fn project_settings_for(&self, git_dir: &Path) -> ProjectSettings {
+        self.project_settings
+            .get(&key_for(git_dir))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_project_settings(&mut self, git_dir: &Path, settings: ProjectSettings) {
+        self.project_settings.insert(key_for(git_dir), settings);
     }
 }
 
@@ -154,4 +200,41 @@ fn key_for(git_dir: &Path) -> String {
         .unwrap_or_else(|_| git_dir.to_path_buf())
         .to_string_lossy()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_views_orders_newest_first() {
+        let mut state = State::default();
+        let git_dir = Path::new("/tmp/ticgit-session-state-test");
+        let older = OffsetDateTime::from_unix_timestamp(1).unwrap();
+        let newer = OffsetDateTime::from_unix_timestamp(2).unwrap();
+
+        state.save_view(
+            git_dir,
+            "older",
+            SavedView {
+                created_at: Some(older),
+                ..Default::default()
+            },
+        );
+        state.save_view(
+            git_dir,
+            "newer",
+            SavedView {
+                created_at: Some(newer),
+                ..Default::default()
+            },
+        );
+
+        let names = state
+            .list_views(git_dir)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["newer", "older"]);
+    }
 }

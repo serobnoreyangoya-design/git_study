@@ -117,9 +117,9 @@ fn init_is_idempotent() {
 }
 
 #[test]
-fn help_agent_prints_markdown_guide() {
+fn agent_prints_markdown_guide() {
     let mut cmd = assert_cmd::Command::cargo_bin("ti").expect("ti binary");
-    cmd.args(["help", "--agent"])
+    cmd.arg("agent")
         .assert()
         .success()
         .stdout(predicate::str::contains("---"))
@@ -128,7 +128,8 @@ fn help_agent_prints_markdown_guide() {
         .stdout(predicate::str::contains("ti new -F /tmp/ticket.md"))
         .stdout(predicate::str::contains("ti list --markdown"))
         .stdout(predicate::str::contains("Prefer `--markdown`"))
-        .stdout(predicate::str::contains("ti state closed"));
+        .stdout(predicate::str::contains("ti close -t <id>"))
+        .stdout(predicate::str::contains("--json").not());
 }
 
 #[test]
@@ -153,6 +154,7 @@ fn machine_output_schema_is_published_and_matches_cli_contract() {
             "status".to_string(),
             "state".to_string(),
             "assigned".to_string(),
+            "closed_by".to_string(),
             "priority".to_string(),
             "points".to_string(),
             "milestone".to_string(),
@@ -620,6 +622,7 @@ fn mutating_commands_update_ticket() {
     assert_eq!(json["status"], "closed");
     assert_eq!(json["state"], "resolved");
     assert_eq!(json["assigned"], "tester@example.com");
+    assert_eq!(json["closed_by"], "tester@example.com");
     assert_eq!(json["points"], 5);
     assert_eq!(json["milestone"], "v1");
     assert_eq!(json["tags"].as_array().unwrap().len(), 2);
@@ -709,6 +712,20 @@ fn ticket_mutations_support_json_output() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["status"], "open");
     assert_eq!(json["state"], "blocked");
+    assert_eq!(json["closed_by"], Value::Null);
+
+    let output = repo
+        .ti()
+        .args(["claim", "-t", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["assigned"], "tester@example.com");
+    assert_eq!(json["status"], "open");
+    assert_eq!(json["state"], "assigned");
 
     let output = repo
         .ti()
@@ -917,10 +934,7 @@ fn list_filters_and_saved_views_work() {
         .stdout(predicate::str::contains("docs ticket").not());
 
     // Save the last list filters as a view.
-    repo.ti()
-        .args(["views", "save", "bugs"])
-        .assert()
-        .success();
+    repo.ti().args(["views", "save", "bugs"]).assert().success();
 
     repo.ti()
         .args(["views"])
@@ -942,6 +956,116 @@ fn list_filters_and_saved_views_work() {
         .args(["views", "delete", "bugs"])
         .assert()
         .success();
+}
+
+#[test]
+fn writeup_workflow_creates_versions_links_and_promotes() {
+    let repo = TestRepo::new();
+    let output = repo
+        .ti()
+        .args([
+            "writeup",
+            "new",
+            "--title",
+            "Rethink sync",
+            "--body",
+            "Initial notes",
+            "--tags",
+            "design",
+            "--id-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let writeup = String::from_utf8(output).unwrap().trim().to_string();
+    let writeup_prefix = &writeup[..6];
+
+    repo.ti()
+        .args(["writeup", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(writeup_prefix))
+        .stdout(predicate::str::contains("Rethink sync"))
+        .stdout(predicate::str::contains("[design]"));
+
+    repo.ti()
+        .args(["writeup", "edit", writeup_prefix, "--body", "Second notes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Appended version 2"));
+
+    repo.ti()
+        .args(["tag", "--writeup", writeup_prefix, "review"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("review"));
+    repo.ti()
+        .args(["tag", "--writeup", writeup_prefix, "--remove", "design"])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["writeup", "show", writeup_prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Writeup: Rethink sync"))
+        .stdout(predicate::str::contains("- Tags: review"))
+        .stdout(predicate::str::contains("Second notes"))
+        .stdout(predicate::str::contains("Initial notes").not());
+
+    let ticket = create_ticket(&repo, "related ticket");
+    repo.ti()
+        .args(["writeup", "link", writeup_prefix, &ticket[..6]])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["writeup", "show", writeup_prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&ticket));
+    repo.ti()
+        .args(["writeup", "unlink", writeup_prefix, &ticket[..6]])
+        .assert()
+        .success();
+
+    let promoted_output = repo
+        .ti()
+        .args(["writeup", "promote", writeup_prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Promoted writeup"))
+        .get_output()
+        .stdout
+        .clone();
+    let promoted_stdout = String::from_utf8(promoted_output).unwrap();
+    let promoted_id = promoted_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Full ticket id: "))
+        .expect("promoted ticket id");
+    repo.ti()
+        .args(["show", promoted_id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Ticket: Rethink sync"))
+        .stdout(predicate::str::contains("review"))
+        .stdout(predicate::str::contains("Second notes"));
+
+    repo.ti()
+        .args(["writeup", "close", writeup_prefix])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["writeup", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rethink sync").not());
+    repo.ti()
+        .args(["writeup", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rethink sync"));
 }
 
 #[test]
