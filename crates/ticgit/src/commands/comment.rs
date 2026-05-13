@@ -32,8 +32,8 @@ pub fn run(args: Args) -> Result<()> {
     let id = resolve_ticket(&store, args.ticket.as_deref())?;
 
     let body = if args.edit || args.body.is_empty() {
-        editor::capture("Ticket comment (lines starting with # are ignored)")?
-            .context("comment cannot be empty")?
+        let ticket = store.load(&id)?;
+        editor::capture_comment(&ticket.title)?.context("comment cannot be empty")?
     } else {
         args.body.join(" ")
     };

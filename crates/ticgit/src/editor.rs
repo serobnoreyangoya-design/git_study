@@ -15,6 +15,16 @@ pub fn capture_with_initial(prompt: &str, initial: &str) -> Result<Option<String
     soe::capture_with_initial(prompt, initial)
 }
 
+/// Open the editor to capture a ticket comment with ticket context in the
+/// commented prompt block.
+pub fn capture_comment(title: &str) -> Result<Option<String>> {
+    capture(&comment_prompt(title))
+}
+
+fn comment_prompt(title: &str) -> String {
+    format!("Ticket comment\nTicket: {title}\nLines starting with # are ignored.")
+}
+
 /// Read a ticket title/description body from disk. The first line is the
 /// title; remaining lines become the optional description.
 pub fn read_ticket_edit_file(path: &Path) -> Result<(String, Option<String>)> {
@@ -38,4 +48,17 @@ pub fn parse_ticket_edit(raw: &str) -> Result<(String, Option<String>)> {
     };
 
     Ok((title, description))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comment_prompt_includes_ticket_title() {
+        let prompt = comment_prompt("Fix the thing");
+
+        assert!(prompt.contains("Ticket: Fix the thing"));
+        assert!(prompt.contains("Lines starting with # are ignored."));
+    }
 }

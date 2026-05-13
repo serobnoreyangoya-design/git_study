@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>writeups - ticgit docs</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">MENU</button>
+    <div class="layout">
+      <nav class="sidebar">
+        <a class="sidebar-title" href="../index.html">TICGIT</a>
+        <ul>
+          <li><a href="getting-started.html">Getting Started</a></li>
+          <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
+          <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li class="active"><a href="writeups.html">Writeups</a></li>
+          <li><a href="ticket-fields.html">Ticket Fields</a></li>
+          <li><a href="views-and-import.html">Views &amp; Import</a></li>
+          <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
+          <li><a href="agents.html">Agent Integration</a></li>
+        </ul>
+        <div class="sidebar-footer">
+          <a href="https://github.com/schacon/ticgit">github</a>
+          <a href="https://github.com/schacon/ticgit/releases">changelog</a>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="doc-header">
+          <div class="topline">
+            <span>TICGIT DOCS</span>
+            <span>WRITEUPS</span>
+          </div>
+        </header>
+
+        <h1>Writeups</h1>
+        <p>Commands: <code>ti writeup new</code>, <code>ti writeup list</code>, <code>ti writeup show</code>, <code>ti writeup edit</code>, <code>ti writeup promote</code>, <code>ti writeup link</code>, <code>ti writeup unlink</code>, <code>ti writeup close</code></p>
+        <p>Writeups are versioned notes that live next to tickets. Use them for investigation notes, design sketches, release notes, longer implementation plans, or anything that should be preserved without becoming an actionable ticket immediately.</p>
+
+        <h2>When to use a writeup</h2>
+        <p>Use a ticket when the next action is clear and tracked through the lifecycle. Use a writeup when the work is exploratory, narrative, or expected to evolve over several edits before it becomes ticket-sized.</p>
+
+        <table>
+          <thead>
+            <tr><th>Use a ticket for</th><th>Use a writeup for</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>Known bugs and tasks</td><td>Research notes and findings</td></tr>
+            <tr><td>Work that needs assignment or priority</td><td>Design alternatives and tradeoffs</td></tr>
+            <tr><td>Items that should move through state</td><td>Long-form implementation notes</td></tr>
+            <tr><td>Small, reviewable units of work</td><td>Drafts that may later become tickets</td></tr>
+          </tbody>
+        </table>
+
+        <h2>Create</h2>
+        <p>Create a writeup with a title and optional body. If the title or body is omitted, TicGit opens your editor.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>NEW WRITEUP</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup new --title "Auth migration plan" --body "Move sessions to signed JWTs."</div>
+            <div class="line dim">Created writeup b4d1a2 (Auth migration plan)</div>
+            <div class="line dim">Full id: b4d1a2f0-2d3b-4c8b-9b0d-...</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup new --title "Parser cleanup" --file notes.md --tags design,parser</div>
+          </div>
+        </div>
+
+        <h2>List and read</h2>
+        <p>By default, <code>ti writeup list</code> shows open writeups. Pass <code>--all</code> to include closed writeups.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>LIST WRITEUPS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup list</div>
+            <div class="line dim">b4d1a2 open   1      v1 Auth migration plan [design,auth]</div>
+            <div class="line dim">9c17ee open   2      v3 Parser cleanup [parser]</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup list --all</div>
+          </div>
+        </div>
+
+        <div class="terminal">
+          <div class="term-header"><span>SHOW WRITEUP</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup show b4d1a2</div>
+            <div class="line dim">Shows the latest version.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup show b4d1a2 --all</div>
+            <div class="line dim">Shows every saved version.</div>
+          </div>
+        </div>
+
+        <h2>Edit versions</h2>
+        <p>Editing a writeup appends a new version instead of replacing the old one. That makes writeups useful for evolving notes where previous context still matters.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>APPEND VERSION</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup edit b4d1a2</div>
+            <div class="line dim">Opens $EDITOR with the latest version prefilled.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup edit b4d1a2 --body "Updated plan after review."</div>
+            <div class="line dim">Appended version 2 to writeup b4d1a2.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup edit b4d1a2 --file revised-plan.md</div>
+          </div>
+        </div>
+
+        <h2>Link to tickets</h2>
+        <p>A writeup can be linked to one or more tickets. Use this when a design note, investigation, or implementation record explains why a ticket exists or how it was handled.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>LINK WRITEUP TO TICKET</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup link b4d1a2 a3f29c</div>
+            <div class="line dim">Linked writeup b4d1a2 to ticket a3f29c.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup unlink b4d1a2 a3f29c</div>
+          </div>
+        </div>
+
+        <p>Linked writeups show up in the TUI details pane and keep the long-form context close to the ticket without overloading ticket comments.</p>
+
+        <h2>Promote into a ticket</h2>
+        <p>When a writeup turns into actionable work, promote it. TicGit creates a new ticket from the writeup title and latest body.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>PROMOTE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup promote b4d1a2</div>
+            <div class="line dim">Promoted writeup b4d1a2 to ticket e70ac1 (Auth migration plan)</div>
+            <div class="line dim">Full ticket id: e70ac13a-...</div>
+          </div>
+        </div>
+
+        <h2>Close or archive</h2>
+        <p>Close a writeup when it is no longer active. <code>archive</code> is an alias for <code>close</code>.</p>
+
+        <div class="terminal">
+          <div class="term-header"><span>CLOSE</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup close b4d1a2</div>
+            <div class="line dim">Closed writeup b4d1a2.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup archive b4d1a2</div>
+          </div>
+        </div>
+
+        <h2>Workflow</h2>
+        <p>A common workflow is to start with notes, revise them as the idea becomes concrete, then either link the writeup to existing work or promote it into a ticket.</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>WRITEUP TO TICKET</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti writeup new --title "Search ranking notes" --tags research</div>
+            <div class="line dim">Capture early findings in $EDITOR.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup edit 9c17ee --file ranking-v2.md</div>
+            <div class="line"><span class="prompt">$</span> ti writeup show 9c17ee --all</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti writeup promote 9c17ee</div>
+            <div class="line"><span class="prompt">$</span> ti checkout e70ac1</div>
+            <div class="line"><span class="prompt">$</span> ti spec --file implementation-plan.md</div>
+            <div class="line"><span class="prompt">$</span> ti state assigned</div>
+          </div>
+        </div>
+
+        <footer class="doc-footer">
+          <span>$ cargo install ticgit</span>
+          <span><a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

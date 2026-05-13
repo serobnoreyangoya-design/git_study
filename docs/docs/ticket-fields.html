@@ -15,6 +15,7 @@
           <li><a href="getting-started.html">Getting Started</a></li>
           <li><a href="creating-tickets.html">Creating &amp; Browsing</a></li>
           <li><a href="working-on-tickets.html">Working on Tickets</a></li>
+          <li><a href="writeups.html">Writeups</a></li>
           <li class="active"><a href="ticket-fields.html">Ticket Fields</a></li>
           <li><a href="views-and-import.html">Views &amp; Import</a></li>
           <li><a href="sync-and-setup.html">Sync &amp; Setup</a></li>
@@ -35,7 +36,7 @@
         </header>
 
         <h1>Ticket Fields</h1>
-        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti priority</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti code</code>, <code>ti meta</code>, <code>ti edit</code></p>
+        <p>Commands: <code>ti tag</code>, <code>ti assign</code>, <code>ti priority</code>, <code>ti points</code>, <code>ti milestone</code>, <code>ti subissue</code>, <code>ti spec</code>, <code>ti code</code>, <code>ti meta</code>, <code>ti edit</code></p>
         <p>Every ticket has a set of built-in fields. These commands let you set them without opening an editor.</p>
 
         <h2>Tags</h2>
@@ -178,6 +179,7 @@
 
         <h2>Spec</h2>
         <p>The spec field holds implementation specifications -- the "how", separate from the description's "what/why". It's a top-level ticket field like title and description.</p>
+        <p>Use a spec when the ticket title and description identify the problem, but the implementation path needs to be agreed on before coding. Specs are especially useful for multi-step changes, agent workflows, and review handoff because they travel with the ticket and show up in JSON, Markdown, and filtered output.</p>
 
         <h3>Viewing the spec</h3>
         <p>When a spec is set, <code>ti show</code> displays its first line in the ticket header:</p>
@@ -240,6 +242,9 @@
           <div class="term-body">
             <div class="line"><span class="prompt">$</span> ti spec</div>
             <div class="line dim">Opens $EDITOR with the current spec for editing.</div>
+            <div class="line">&nbsp;</div>
+            <div class="line"><span class="prompt">$</span> ti spec --ticket a3f</div>
+            <div class="line dim">Edit the spec for a specific ticket.</div>
           </div>
         </div>
 

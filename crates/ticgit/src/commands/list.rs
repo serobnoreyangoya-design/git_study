@@ -196,6 +196,7 @@ pub fn run(args: Args) -> Result<()> {
             all: args.all,
             subissues: args.subissues,
             limit: args.limit,
+            columns: Vec::new(),
         };
         if let Ok(mut session_state) = State::load() {
             session_state.set_last_filters(&git_dir, saved);

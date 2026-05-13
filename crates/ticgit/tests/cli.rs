@@ -87,6 +87,26 @@ fn editor_script(repo: &TestRepo, contents: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn capturing_editor_script(repo: &TestRepo, captured: &Path, contents: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = repo.state_file.path().join("capturing-editor.sh");
+    fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ncp \"$1\" \"{}\"\ncat > \"$1\" <<'EOF'\n{contents}\nEOF\n",
+            captured.display()
+        ),
+    )
+    .expect("write capturing editor script");
+
+    let mut permissions = fs::metadata(&path).expect("editor metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("chmod editor script");
+    path
+}
+
+#[cfg(unix)]
 fn executable_script(dir: &Path, name: &str, contents: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
@@ -600,6 +620,36 @@ fn edit_updates_title_and_description() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["title"], "new title");
     assert_eq!(json["description"], "new description\nsecond line");
+}
+
+#[test]
+#[cfg(unix)]
+fn comment_editor_prompt_includes_ticket_title() {
+    let repo = TestRepo::new();
+    let id = create_ticket(&repo, "prompt title");
+    let captured = repo.state_file.path().join("comment-template.md");
+    let editor = capturing_editor_script(&repo, &captured, "edited body\n");
+
+    repo.ti()
+        .env("GIT_EDITOR", &editor)
+        .args(["comment", "-t", &id, "--edit"])
+        .assert()
+        .success();
+
+    let template = fs::read_to_string(captured).unwrap();
+    assert!(template.contains("# Ticket comment"));
+    assert!(template.contains("# Ticket: prompt title"));
+
+    let output = repo
+        .ti()
+        .args(["show", &id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["comments"][0]["body"], "edited body");
 }
 
 #[test]
