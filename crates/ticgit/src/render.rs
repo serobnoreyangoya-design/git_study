@@ -126,8 +126,8 @@ fn tickets_table_with_width(
     let id_width = ref_lengths.values().copied().max().unwrap_or(6).max(6);
     const STATUS_WIDTH: usize = 6;
     const STATE_WIDTH: usize = 11;
-    const DATE_WIDTH: usize = 5;
-    const PRIORITY_WIDTH: usize = 4;
+    const DATE_WIDTH: usize = 3;
+    const PRIORITY_WIDTH: usize = 1;
     const ASSIGNED_WIDTH: usize = 8;
     const TAGS_WIDTH: usize = 20;
     const MIN_TITLE_WIDTH: usize = 12;
@@ -145,9 +145,9 @@ fn tickets_table_with_width(
     );
 
     let mut out = String::new();
-    let mut header = format!("  {} {} ", fit("TicId", id_width), fit("Date", DATE_WIDTH),);
+    let mut header = format!("  {} {} ", fit("TicId", id_width), fit("Dt", DATE_WIDTH),);
     if layout.show_priority {
-        header.push_str(&fit("Pri", PRIORITY_WIDTH));
+        header.push_str(&fit("P", PRIORITY_WIDTH));
         header.push(' ');
     }
     header.push_str(&format!(
@@ -166,8 +166,6 @@ fn tickets_table_with_width(
     }
     out.push_str(&ansi(ANSI_DIM, &header));
     out.push('\n');
-    out.push_str(&ansi(ANSI_DIM, &"-".repeat(width)));
-    out.push('\n');
 
     for t in tickets {
         let marker = if Some(&t.id) == current { "*" } else { " " };
@@ -179,7 +177,7 @@ fn tickets_table_with_width(
         out.push(' ');
         out.push_str(&ansi(
             ANSI_DIM,
-            &fit(&relative_time(t.created_at, now), DATE_WIDTH),
+            &fit(&compact_relative_time(t.created_at, now), DATE_WIDTH),
         ));
         out.push(' ');
         if layout.show_priority {
@@ -190,7 +188,6 @@ fn tickets_table_with_width(
             out.push_str(&ansi(ANSI_PURPLE, &fit(&priority, PRIORITY_WIDTH)));
             out.push(' ');
         }
-        out.push(' ');
         if t.children.is_empty() {
             out.push_str(&ansi(
                 ANSI_BLUE,
@@ -943,6 +940,19 @@ fn status_color(status: &str) -> &'static str {
     }
 }
 
+fn compact_relative_time(then: OffsetDateTime, now: OffsetDateTime) -> String {
+    let label = relative_time(then, now);
+    if label.len() <= 3 {
+        return label;
+    }
+    label
+        .strip_suffix("mo")
+        .unwrap_or(&label)
+        .chars()
+        .take(3)
+        .collect()
+}
+
 fn friendly_date(when: OffsetDateTime) -> String {
     format!(
         "{:04}-{:02}-{:02}",
@@ -1003,9 +1013,9 @@ mod tests {
             None,
         ));
 
-        assert!(table.contains("Pri"));
-        assert!(table.contains(" 2   "));
-        assert!(table.find("Pri").unwrap() < table.find("Title").unwrap());
+        assert!(!table.contains("Pri"));
+        assert!(table.contains("Dt  P  Title"));
+        assert!(table.contains(" 2 priority ticket"));
         assert!(table.contains("Assgn"));
         assert!(table.contains("Tags"));
     }
@@ -1026,11 +1036,13 @@ mod tests {
             &[ticket.clone()],
             None,
             &refs,
-            55,
+            54,
             OffsetDateTime::UNIX_EPOCH,
             None,
         ));
-        assert!(medium.contains("Pri"));
+        assert!(!medium.contains("Pri"));
+        assert!(medium.contains("Dt  P  Title"));
+        assert!(medium.contains(" 2 "));
         assert!(!medium.contains("Assgn"));
         assert!(!medium.contains("Tags"));
 
@@ -1038,13 +1050,43 @@ mod tests {
             &[ticket],
             None,
             &refs,
-            50,
+            46,
             OffsetDateTime::UNIX_EPOCH,
             None,
         ));
-        assert!(!narrow.contains("Pri"));
+        assert!(!narrow.contains(" 2 "));
         assert!(!narrow.contains("Assgn"));
         assert!(!narrow.contains("Tags"));
+    }
+
+    #[test]
+    fn compact_relative_time_fits_table_date_column() {
+        let now = OffsetDateTime::UNIX_EPOCH + time::Duration::days(400);
+
+        assert_eq!(
+            UnicodeWidthStr::width(
+                fit(
+                    &compact_relative_time(now - time::Duration::hours(48), now),
+                    3
+                )
+                .as_str()
+            ),
+            3
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(
+                fit(
+                    &compact_relative_time(now - time::Duration::days(3), now),
+                    3
+                )
+                .as_str()
+            ),
+            3
+        );
+        assert_eq!(
+            compact_relative_time(now - time::Duration::days(360), now),
+            "12"
+        );
     }
 
     fn ticket(id: &str, title: &str, state: TicketState) -> Ticket {

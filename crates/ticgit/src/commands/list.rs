@@ -51,8 +51,8 @@ pub struct Args {
     #[arg(long = "subissues")]
     pub subissues: bool,
 
-    /// Maximum number of tickets to show.
-    #[arg(short = 'n', long = "limit", default_value_t = 20)]
+    /// Maximum number of tickets to show. Defaults to available terminal rows.
+    #[arg(short = 'n', long = "limit", default_value_t = 0)]
     pub limit: usize,
 
     /// Output as JSON.
@@ -78,7 +78,7 @@ impl Default for Args {
             search: None,
             order: None,
             subissues: false,
-            limit: 20,
+            limit: 0,
             json: false,
             markdown: false,
         }
@@ -109,7 +109,7 @@ pub fn run(args: Args) -> Result<()> {
             search: saved.search.clone(),
             order: saved.order.clone(),
             subissues: saved.subissues,
-            limit: if saved.limit > 0 { saved.limit } else { 20 },
+            limit: saved.limit,
             json: args.json,
             markdown: args.markdown,
         }
@@ -159,9 +159,20 @@ pub fn run(args: Args) -> Result<()> {
         hide_subissues: !args.subissues,
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
-    if !args.all && args.limit > 0 {
-        tickets.truncate(args.limit);
+    let total = tickets.len();
+    let limit = if args.all {
+        0
+    } else if args.limit > 0 {
+        args.limit
+    } else if args.json || args.markdown {
+        20
+    } else {
+        terminal_table_limit(total)
+    };
+    if !args.all && limit > 0 {
+        tickets.truncate(limit);
     }
+    let omitted = total.saturating_sub(tickets.len());
 
     // Save last-used filters so `ti views save` can recall them.
     if args.view.is_none() {
@@ -205,16 +216,29 @@ pub fn run(args: Args) -> Result<()> {
     let current = session_state.current_for(&git_dir);
     let users = store.list_users().unwrap_or_default();
     let nicks = render::build_nick_map(&users);
-    println!(
-        "{}",
-        render::tickets_table_with_refs(
-            &tickets,
-            current.as_ref(),
-            &open_ref_lengths,
-            Some(&nicks)
-        )
+    let mut table = render::tickets_table_with_refs(
+        &tickets,
+        current.as_ref(),
+        &open_ref_lengths,
+        Some(&nicks),
     );
+    if omitted > 0 {
+        table.push_str(&format!("... and {omitted} more open issues\n"));
+    }
+    print!("{table}");
     Ok(())
+}
+
+fn terminal_table_limit(total: usize) -> usize {
+    let rows = crossterm::terminal::size()
+        .map(|(_, rows)| rows as usize)
+        .unwrap_or(24);
+    table_limit_for_rows(total, rows)
+}
+
+fn table_limit_for_rows(total: usize, rows: usize) -> usize {
+    let reserved = if total > rows.saturating_sub(1) { 2 } else { 1 };
+    rows.saturating_sub(reserved).max(1)
 }
 
 fn saved_tags(saved: &SavedView) -> Vec<String> {
@@ -222,4 +246,16 @@ fn saved_tags(saved: &SavedView) -> Vec<String> {
         return saved.tags.clone();
     }
     saved.tag.iter().cloned().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_limit_reserves_footer_only_when_rows_are_omitted() {
+        assert_eq!(table_limit_for_rows(3, 10), 9);
+        assert_eq!(table_limit_for_rows(10, 10), 8);
+        assert_eq!(table_limit_for_rows(10, 2), 1);
+    }
 }
