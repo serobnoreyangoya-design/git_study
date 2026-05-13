@@ -11,11 +11,13 @@ readme = "../../README.md"
 keywords.workspace = true
 categories.workspace = true
 include = [
+    "build.rs",
+    "docs/**",
     "src/**",
     "tests/**",
     "Cargo.toml",
     "../../README.md",
-    "../../LICENSE_MIT",
+    "../../LICENSE",
 ]
 
 [[bin]]
@@ -23,7 +25,7 @@ name = "ti"
 path = "src/main.rs"
 
 [dependencies]
-ticgit-lib = { version = "0.2.0", path = "../ticgit-lib" }
+ticgit-lib = { version = "0.2.1", path = "../ticgit-lib" }
 
 anyhow      = { workspace = true }
 clap        = { workspace = true }
@@ -46,4 +48,4 @@ uuid        = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile   = { workspace = true }
-ticgit-lib = { version = "0.2.0", path = "../ticgit-lib", features = ["test-support"] }
+ticgit-lib = { version = "0.2.1", path = "../ticgit-lib", features = ["test-support"] }

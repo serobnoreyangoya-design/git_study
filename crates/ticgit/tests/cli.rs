@@ -134,7 +134,7 @@ fn agent_prints_markdown_guide() {
 
 #[test]
 fn machine_output_schema_is_published_and_matches_cli_contract() {
-    let schema: Value = serde_json::from_str(include_str!("../../../docs/schema/v1.json")).unwrap();
+    let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
     assert_eq!(schema["$id"], "https://ticgit.dev/schema/v1.json");
     assert_eq!(schema["$defs"]["ticket"]["additionalProperties"], false);
 

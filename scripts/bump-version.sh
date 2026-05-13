@@ -3,12 +3,12 @@ set -euo pipefail
 
 if [ $# -ne 1 ]; then
   echo "Usage: $0 <new-version>"
-  echo "Example: $0 0.2.0"
+  echo "Example: $0 0.2.1"
   exit 1
 fi
 
 NEW="$1"
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Update workspace version in Cargo.toml
 sed -i '' "s/^version = \".*\"/version = \"${NEW}\"/" "$ROOT/Cargo.toml"
