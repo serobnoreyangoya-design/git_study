@@ -23,6 +23,10 @@ pub struct Args {
     #[arg(long = "all")]
     pub all: bool,
 
+    /// Show all open tickets, without terminal-height truncation.
+    #[arg(long = "open", conflicts_with_all = ["all", "status", "state", "limit"])]
+    pub open: bool,
+
     /// Show only tickets with this tag.
     #[arg(short = 'g', long = "tag")]
     pub tag: Vec<String>,
@@ -71,6 +75,7 @@ impl Default for Args {
             state: None,
             status: None,
             all: false,
+            open: false,
             tag: Vec::new(),
             tag_mode: "all".to_string(),
             assigned: None,
@@ -102,6 +107,7 @@ pub fn run(args: Args) -> Result<()> {
             state: saved.state.clone(),
             status: saved.status.clone(),
             all: saved.all,
+            open: false,
             tag: saved_tags(&saved),
             tag_mode: if saved.tag_match_all { "all" } else { "any" }.to_string(),
             assigned: saved.assigned.clone(),
@@ -160,7 +166,7 @@ pub fn run(args: Args) -> Result<()> {
     };
     let mut tickets = ticgit_lib::query::apply(tickets, &filter);
     let total = tickets.len();
-    let limit = if args.all {
+    let limit = if args.all || args.open {
         0
     } else if args.limit > 0 {
         args.limit
@@ -237,7 +243,7 @@ fn terminal_table_limit(total: usize) -> usize {
 }
 
 fn table_limit_for_rows(total: usize, rows: usize) -> usize {
-    let reserved = if total > rows.saturating_sub(1) { 2 } else { 1 };
+    let reserved = if total > rows.saturating_sub(2) { 3 } else { 2 };
     rows.saturating_sub(reserved).max(1)
 }
 
@@ -254,8 +260,8 @@ mod tests {
 
     #[test]
     fn table_limit_reserves_footer_only_when_rows_are_omitted() {
-        assert_eq!(table_limit_for_rows(3, 10), 9);
-        assert_eq!(table_limit_for_rows(10, 10), 8);
+        assert_eq!(table_limit_for_rows(3, 10), 8);
+        assert_eq!(table_limit_for_rows(10, 10), 7);
         assert_eq!(table_limit_for_rows(10, 2), 1);
     }
 }

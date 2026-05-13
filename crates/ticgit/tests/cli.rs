@@ -133,6 +133,48 @@ fn agent_prints_markdown_guide() {
 }
 
 #[test]
+fn agent_skill_installs_local_shared_skill_and_checks_it() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-local"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".agents/skills/ticgit/SKILL.md"));
+
+    let skill = fs::read_to_string(repo.dir.path().join(".agents/skills/ticgit/SKILL.md"))
+        .expect("skill file");
+    assert!(skill.contains("name: ticgit"));
+    assert!(skill.contains("# TicGit Agent Guide"));
+    assert!(skill.contains("ti list --markdown"));
+
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-local", "--check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("installed and current"));
+}
+
+#[test]
+fn agent_skill_installs_agents_md_idempotently() {
+    let repo = TestRepo::new();
+
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-md"])
+        .assert()
+        .success();
+    repo.ti()
+        .args(["agent", "skill", "--target", "agents-md"])
+        .assert()
+        .success();
+
+    let agents = fs::read_to_string(repo.dir.path().join("AGENTS.md")).expect("AGENTS.md");
+    assert_eq!(agents.matches("<!-- ticgit-agent-start -->").count(), 1);
+    assert!(agents.contains("This project uses TicGit"));
+    assert!(agents.contains("Run `ti agent`"));
+}
+
+#[test]
 fn machine_output_schema_is_published_and_matches_cli_contract() {
     let schema: Value = serde_json::from_str(include_str!(env!("TICGIT_SCHEMA_V1_PATH"))).unwrap();
     assert_eq!(schema["$id"], "https://ticgit.dev/schema/v1.json");
@@ -325,6 +367,36 @@ fn bare_ti_defaults_to_list() {
         .success()
         .stdout(predicate::str::contains("bare ti"))
         .stderr(predicate::str::contains("unknown tag mode").not());
+}
+
+#[test]
+fn list_open_shows_all_open_tickets_without_default_truncation() {
+    let repo = TestRepo::new();
+    for i in 0..25 {
+        create_ticket(&repo, &format!("open ticket {i}"));
+    }
+
+    let default_output = repo
+        .ti()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_list: Value = serde_json::from_slice(&default_output).unwrap();
+    assert_eq!(default_list.as_array().unwrap().len(), 20);
+
+    let open_output = repo
+        .ti()
+        .args(["list", "--open", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let open_list: Value = serde_json::from_slice(&open_output).unwrap();
+    assert_eq!(open_list.as_array().unwrap().len(), 25);
 }
 
 #[test]

@@ -166,6 +166,8 @@ fn tickets_table_with_width(
     }
     out.push_str(&ansi(ANSI_DIM, &header));
     out.push('\n');
+    out.push_str(&ansi(ANSI_DIM, &"-".repeat(width)));
+    out.push('\n');
 
     for t in tickets {
         let marker = if Some(&t.id) == current { "*" } else { " " };

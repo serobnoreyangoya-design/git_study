@@ -122,8 +122,8 @@ pub enum Command {
     /// Browse open tickets in an interactive terminal UI.
     Tui(commands::tui::Args),
 
-    /// Print a Markdown guide for AI agents.
-    Agent,
+    /// Print or install AI agent integration guidance.
+    Agent(commands::agent::Args),
 
     // -- Work on tickets --------------------------------------------------
     /// Select a ticket as "current" for subsequent commands.
@@ -253,10 +253,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Some(Command::History(args)) => commands::history::run(args),
         Some(Command::Tui(args)) => commands::tui::run(args),
-        Some(Command::Agent) => {
-            crate::agent_help::print();
-            Ok(())
-        }
+        Some(Command::Agent(args)) => commands::agent::run(args),
         Some(Command::Tag(args)) => commands::tag::run(args),
         Some(Command::State(args)) => commands::state::run(args),
         Some(Command::Status(args)) => commands::state::run(args),
