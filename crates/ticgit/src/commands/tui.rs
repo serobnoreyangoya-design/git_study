@@ -191,6 +191,7 @@ struct App {
     assigned_filter: Option<String>,
     only_tagged: bool,
     hide_subissues: bool,
+    show_subissues_preference: bool,
     sort_order: Option<SortOrder>,
     sort_closed_desc: bool,
     closed_at: HashMap<uuid::Uuid, OffsetDateTime>,
@@ -340,7 +341,16 @@ struct NewTicketDraft {
     description: String,
     tags: String,
     assigned: String,
+    parent: Option<uuid::Uuid>,
     field: NewTicketField,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutlineRow {
+    ticket_idx: usize,
+    depth: usize,
+    has_children: bool,
+    collapsed: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -361,6 +371,7 @@ impl App {
             .detail_width_percent
             .unwrap_or(DETAIL_WIDTH_PERCENT_DEFAULT)
             .clamp(DETAIL_WIDTH_PERCENT_MIN, DETAIL_WIDTH_PERCENT_MAX);
+        let show_subissues_preference = project_settings.show_subissues.unwrap_or(false);
         let mut app = Self {
             store,
             all_tickets: Vec::new(),
@@ -382,7 +393,8 @@ impl App {
             base_state: None,
             assigned_filter: None,
             only_tagged: false,
-            hide_subissues: false,
+            hide_subissues: !show_subissues_preference,
+            show_subissues_preference,
             sort_order: None,
             sort_closed_desc: false,
             closed_at: HashMap::new(),
@@ -443,14 +455,14 @@ impl App {
         self.apply_filter();
 
         if let Some(id) = preferred_id {
-            if let Some(visible_pos) = self
-                .visible
+            let list_indices = self.list_ticket_indices();
+            if let Some(list_pos) = list_indices
                 .iter()
                 .position(|idx| self.tickets[*idx].id == id)
             {
-                self.list_state.select(Some(visible_pos));
+                self.list_state.select(Some(list_pos));
                 if self.detail.is_some() {
-                    self.detail = self.visible.get(visible_pos).copied();
+                    self.detail = list_indices.get(list_pos).copied();
                 }
             } else if self.detail.is_some() {
                 self.detail = None;
@@ -550,7 +562,7 @@ impl App {
                 self.draw_comments_list(frame, panes[0]);
                 self.draw_comment_detail(frame, panes[1]);
             } else {
-                self.draw_list(frame, panes[0]);
+                self.draw_issue_view(frame, panes[0]);
                 self.draw_detail(frame, panes[1]);
             }
         } else if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
@@ -958,6 +970,10 @@ impl App {
                             desc: "issues",
                         },
                         MenuHint {
+                            key: "d",
+                            desc: "issues",
+                        },
+                        MenuHint {
                             key: "r",
                             desc: "refresh",
                         },
@@ -1009,6 +1025,10 @@ impl App {
                             desc: "all/open",
                         },
                         MenuHint {
+                            key: "d",
+                            desc: "stats",
+                        },
+                        MenuHint {
                             key: "c/o",
                             desc: "close/open",
                         },
@@ -1052,6 +1072,14 @@ impl App {
                             desc: "list",
                         },
                         MenuHint {
+                            key: "d",
+                            desc: "stats",
+                        },
+                        MenuHint {
+                            key: "U",
+                            desc: "subissues",
+                        },
+                        MenuHint {
                             key: "s",
                             desc: "state",
                         },
@@ -1093,6 +1121,22 @@ impl App {
                         MenuHint {
                             key: "b",
                             desc: "board",
+                        },
+                        MenuHint {
+                            key: "d",
+                            desc: "stats",
+                        },
+                        MenuHint {
+                            key: "U",
+                            desc: "subissues",
+                        },
+                        MenuHint {
+                            key: "n",
+                            desc: "subissue",
+                        },
+                        MenuHint {
+                            key: "P",
+                            desc: "parent",
                         },
                         MenuHint {
                             key: "+/-",
@@ -1182,6 +1226,14 @@ impl App {
                             desc: "board",
                         },
                         MenuHint {
+                            key: "d",
+                            desc: "stats",
+                        },
+                        MenuHint {
+                            key: "U",
+                            desc: "subissues",
+                        },
+                        MenuHint {
                             key: "n",
                             desc: "new",
                         },
@@ -1243,17 +1295,24 @@ impl App {
         let compact = self.detail.is_some();
         let columns = issue_columns_for_width(&self.issue_columns, row_width);
         let widths = issue_column_widths(&columns, row_width);
+        let ticket_by_id = self
+            .all_tickets
+            .iter()
+            .map(|ticket| (ticket.id, ticket))
+            .collect::<HashMap<_, _>>();
 
         let items: Vec<ListItem<'_>> = self
-            .visible
+            .list_ticket_indices()
             .iter()
             .map(|&idx| {
                 let ticket = &self.tickets[idx];
+                let title_prefix = issue_title_prefix(ticket, &ticket_by_id, !self.hide_subissues);
                 ListItem::new(ticket_table_line(
                     ticket,
                     &columns,
                     &widths,
                     row_width,
+                    &title_prefix,
                     compact,
                     self.store.email(),
                     self.closed_at.get(&ticket.id).copied(),
@@ -1281,6 +1340,12 @@ impl App {
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(list, chunks[1], &mut self.list_state);
+    }
+
+    fn draw_issue_view(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        match self.view {
+            ViewMode::List | ViewMode::Board => self.draw_list(frame, area),
+        }
     }
 
     fn draw_writeup_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1437,6 +1502,18 @@ impl App {
         }
         if let Some(closed_by) = &ticket.closed_by {
             detail_lines.push(field_line("Closed by", closed_by));
+        }
+        if let Some(parent) = ticket.parent {
+            detail_lines.push(field_line("Parent", &self.issue_label(parent)));
+        }
+        if !ticket.children.is_empty() {
+            detail_lines.push(field_line(
+                "Sub-issues",
+                &format!("{} (press U to show in list)", ticket.children.len()),
+            ));
+            for child in ticket.children.iter().take(5) {
+                detail_lines.push(detail_child_issue_line(&self.issue_label(*child)));
+            }
         }
         if let Some(priority) = ticket.priority {
             detail_lines.push(field_line("Priority", &priority.to_string()));
@@ -2334,8 +2411,18 @@ impl App {
     }
 
     fn draw_create_modal(&self, frame: &mut Frame<'_>) {
-        let area = centered_rect(72, 15, frame.area());
-        let lines = vec![
+        let height = if self.new_ticket.parent.is_some() {
+            17
+        } else {
+            15
+        };
+        let area = centered_rect(72, height, frame.area());
+        let mut lines = Vec::new();
+        if let Some(parent_id) = self.new_ticket.parent {
+            lines.push(field_line("Parent", &self.issue_label(parent_id)));
+            lines.push(Line::raw(""));
+        }
+        lines.extend([
             new_ticket_field_line(
                 NewTicketField::Title,
                 self.new_ticket.field,
@@ -2369,9 +2456,14 @@ impl App {
                 "Tab/Up/Down switch fields  Enter create  Esc cancel",
                 Style::default().fg(Color::Yellow),
             )),
-        ];
+        ]);
+        let title = if self.new_ticket.parent.is_some() {
+            "New sub-issue"
+        } else {
+            "New ticket"
+        };
         let modal = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("New ticket"))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: false });
         frame.render_widget(Clear, area);
         frame.render_widget(modal, area);
@@ -2553,11 +2645,17 @@ impl App {
                     ("+/-", "resize detail"),
                     Some(("r", "refresh")),
                 ));
+
+                help_section(&mut lines, "Views");
+                lines.push(help_columns(("d", "stats view"), None));
             }
             Mode::Normal if self.active_tab == TuiTab::Dashboard => {
                 help_section(&mut lines, "Dashboard");
                 lines.push(help_columns(("Tab", "issues tab"), Some(("r", "refresh"))));
                 lines.push(help_columns(("S", "sync tickets"), Some(("q", "quit"))));
+
+                help_section(&mut lines, "Views");
+                lines.push(help_columns(("d", "issues view"), None));
             }
             Mode::Normal if self.view == ViewMode::Board && self.detail.is_none() => {
                 help_section(&mut lines, "Navigation");
@@ -2569,8 +2667,7 @@ impl App {
                     ("Left/Right", "move columns"),
                     Some(("Up/Down", "move tickets")),
                 ));
-                lines.push(help_columns(("Enter", "details"), Some(("b", "list view"))));
-                lines.push(help_columns(("r", "refresh"), None));
+                lines.push(help_columns(("Enter", "details"), Some(("r", "refresh"))));
 
                 help_section(&mut lines, "Edit Ticket");
                 lines.push(help_columns(("C", "claim"), Some(("s", "state"))));
@@ -2580,6 +2677,10 @@ impl App {
                 ));
                 lines.push(help_columns(("c", "comment"), Some(("t", "manage tags"))));
                 lines.push(help_columns(("p", "priority"), Some(("o", "order"))));
+
+                help_section(&mut lines, "Views");
+                lines.push(help_columns(("b", "list view"), Some(("d", "stats view"))));
+                lines.push(help_columns(("U", "subissues"), None));
             }
             Mode::Normal => {
                 help_section(&mut lines, "Navigation");
@@ -2593,13 +2694,13 @@ impl App {
                 ));
                 lines.push(help_columns(
                     ("Enter", "details"),
-                    Some(("b", "board view")),
+                    Some(("n", "new/subissue")),
                 ));
-                lines.push(help_columns(("m", "comments"), Some(("n", "new ticket"))));
+                lines.push(help_columns(("P", "jump parent"), Some(("m", "comments"))));
                 lines.push(help_columns(("+/-", "resize detail"), None));
                 lines.push(help_columns(("r", "refresh"), None));
 
-                help_section(&mut lines, "Views & Filters");
+                help_section(&mut lines, "Filters");
                 lines.push(help_columns(
                     ("/", "search text"),
                     Some(("g", "tag picker")),
@@ -2615,6 +2716,10 @@ impl App {
                 ));
                 lines.push(help_columns(("c", "comment"), Some(("t", "manage tags"))));
                 lines.push(help_columns(("p", "priority"), None));
+
+                help_section(&mut lines, "Views");
+                lines.push(help_columns(("b", "board view"), Some(("d", "stats view"))));
+                lines.push(help_columns(("U", "subissues"), None));
             }
         }
 
@@ -2789,7 +2894,23 @@ impl App {
             }
             KeyCode::Char('b') => {
                 if self.active_tab == TuiTab::Issues {
-                    self.handle_board_key();
+                    self.handle_board_key()?;
+                }
+                false
+            }
+            KeyCode::Char('d') => {
+                self.handle_dashboard_key();
+                false
+            }
+            KeyCode::Char('u') => {
+                if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
+                    self.begin_unlink_issue_select();
+                }
+                false
+            }
+            KeyCode::Char('U') => {
+                if self.active_tab == TuiTab::Issues {
+                    self.toggle_subissue_visibility()?;
                 }
                 false
             }
@@ -2799,7 +2920,11 @@ impl App {
             }
             KeyCode::Char('n') => {
                 if self.active_tab == TuiTab::Issues {
-                    self.begin_create();
+                    if let Some(parent_id) = self.detail.map(|idx| self.tickets[idx].id) {
+                        self.begin_create_subissue(parent_id);
+                    } else {
+                        self.begin_create();
+                    }
                 } else {
                     self.create_writeup_in_editor(terminal)?;
                 }
@@ -2897,6 +3022,12 @@ impl App {
                 }
                 false
             }
+            KeyCode::Char('P') => {
+                if self.active_tab == TuiTab::Issues {
+                    self.jump_to_parent_issue();
+                }
+                false
+            }
             KeyCode::Char('o') => {
                 if self.active_tab == TuiTab::Issues {
                     self.begin_order();
@@ -2923,12 +3054,6 @@ impl App {
             }
             KeyCode::Char('-') => {
                 self.resize_detail(-(DETAIL_WIDTH_PERCENT_STEP as i16));
-                false
-            }
-            KeyCode::Char('u') => {
-                if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
-                    self.begin_unlink_issue_select();
-                }
                 false
             }
             KeyCode::Char('s') => {
@@ -3252,6 +3377,14 @@ impl App {
         self.mode = Mode::Create;
     }
 
+    fn begin_create_subissue(&mut self, parent_id: uuid::Uuid) {
+        self.new_ticket = NewTicketDraft {
+            parent: Some(parent_id),
+            ..Default::default()
+        };
+        self.mode = Mode::Create;
+    }
+
     fn begin_tag_filter(&mut self) {
         let tags = self.available_tags();
         if tags.is_empty() {
@@ -3507,7 +3640,7 @@ impl App {
         self.base_state = None;
         self.assigned_filter = None;
         self.only_tagged = false;
-        self.hide_subissues = false;
+        self.hide_subissues = !self.show_subissues_preference;
         self.sort_order = None;
         self.sort_closed_desc = false;
         self.issue_columns = default_issue_columns();
@@ -3528,7 +3661,7 @@ impl App {
             || self.base_state.is_some()
             || self.assigned_filter.is_some()
             || self.only_tagged
-            || self.hide_subissues
+            || self.hide_subissues != !self.show_subissues_preference
             || self.sort_order.is_some()
             || !self.filter.is_empty()
             || !self.tag_filter.is_empty()
@@ -3815,6 +3948,23 @@ impl App {
         self.open_ticket_by_id(id);
         if self.detail.is_none() {
             self.status = Some("Linked issue is hidden by current filters.".to_string());
+        }
+    }
+
+    fn jump_to_parent_issue(&mut self) {
+        let Some(ticket) = self.detail.map(|idx| &self.tickets[idx]) else {
+            self.status = Some("Open ticket details first.".to_string());
+            return;
+        };
+        let Some(parent) = ticket.parent else {
+            self.status = Some("This issue has no parent.".to_string());
+            return;
+        };
+        self.open_ticket_by_id(parent);
+        if self.detail.map(|idx| self.tickets[idx].id) == Some(parent) {
+            self.status = Some(format!("Opened parent {}.", self.issue_label(parent)));
+        } else {
+            self.status = Some("Parent issue is hidden by current filters.".to_string());
         }
     }
 
@@ -4160,6 +4310,17 @@ impl App {
         )
     }
 
+    fn issue_label(&self, id: uuid::Uuid) -> String {
+        let short_id = id.to_string().chars().take(6).collect::<String>();
+        let title = self
+            .all_tickets
+            .iter()
+            .find(|ticket| ticket.id == id)
+            .map(|ticket| flatten_display(&ticket.title))
+            .unwrap_or_else(|| "missing issue".to_string());
+        format!("{short_id} {title}")
+    }
+
     fn unlink_selected_issue(&mut self) -> Result<bool> {
         let Some(writeup) = self.selected_writeup() else {
             self.status = Some("Select a writeup first.".to_string());
@@ -4293,6 +4454,7 @@ impl App {
                 comment: None,
                 tags: split_tags(&self.new_ticket.tags),
                 assigned: optional_trimmed(&self.new_ticket.assigned).map(ToString::to_string),
+                parent: self.new_ticket.parent,
                 ..Default::default()
             },
         )?;
@@ -4302,6 +4464,9 @@ impl App {
         }
 
         self.filter.clear();
+        if self.new_ticket.parent.is_some() {
+            self.hide_subissues = false;
+        }
         self.detail = Some(0);
         self.reload(Some(id))?;
         self.open_ticket_by_id(id);
@@ -4328,9 +4493,6 @@ impl App {
         }
         if self.only_tagged {
             parts.push("tagged only".to_string());
-        }
-        if self.hide_subissues {
-            parts.push("no subissues".to_string());
         }
         if !self.filter.is_empty() {
             parts.push(format!("\"{}\"", self.filter));
@@ -4601,14 +4763,11 @@ impl App {
 
         self.detail = self.detail.filter(|idx| self.visible.contains(idx));
         self.sync_board_selection();
-        if self.visible.is_empty() {
+        let list_len = self.list_ticket_indices().len();
+        if list_len == 0 {
             self.list_state.select(None);
         } else {
-            let selected = self
-                .list_state
-                .selected()
-                .unwrap_or(0)
-                .min(self.visible.len() - 1);
+            let selected = self.list_state.selected().unwrap_or(0).min(list_len - 1);
             self.list_state.select(Some(selected));
         }
         self.apply_writeup_filter();
@@ -4654,11 +4813,12 @@ impl App {
         if self.active_tab == TuiTab::Dashboard {
             return;
         }
-        if self.visible.is_empty() {
+        let list_len = self.list_ticket_indices().len();
+        if list_len == 0 {
             return;
         }
         let selected = self.list_state.selected().unwrap_or(0);
-        let next = (selected + 1) % self.visible.len();
+        let next = (selected + 1) % list_len;
         self.list_state.select(Some(next));
         self.sync_open_detail();
     }
@@ -4671,15 +4831,20 @@ impl App {
         if self.active_tab == TuiTab::Dashboard {
             return;
         }
-        if self.visible.is_empty() {
+        let list_len = self.list_ticket_indices().len();
+        if list_len == 0 {
             return;
         }
         let selected = self.list_state.selected().unwrap_or(0);
         let previous = selected
             .checked_sub(1)
-            .unwrap_or_else(|| self.visible.len().saturating_sub(1));
+            .unwrap_or_else(|| list_len.saturating_sub(1));
         self.list_state.select(Some(previous));
         self.sync_open_detail();
+    }
+
+    fn list_ticket_indices(&self) -> Vec<usize> {
+        ordered_list_indices(&self.tickets, &self.visible, !self.hide_subissues)
     }
 
     fn next_writeup(&mut self) {
@@ -4731,6 +4896,7 @@ impl App {
         let mut state = State::load().unwrap_or_default();
         let mut settings = state.project_settings_for(&git_dir);
         settings.detail_width_percent = Some(self.detail_width_percent);
+        settings.show_subissues = Some(self.show_subissues_preference);
         state.set_project_settings(&git_dir, settings);
         state.save()
     }
@@ -4756,17 +4922,9 @@ impl App {
                 self.view = ViewMode::List;
                 TuiTab::Writeups
             }
-            TuiTab::Writeups => TuiTab::Dashboard,
+            TuiTab::Writeups => TuiTab::Issues,
             TuiTab::Dashboard => TuiTab::Issues,
         };
-    }
-
-    fn toggle_view(&mut self) {
-        self.view = match self.view {
-            ViewMode::List => ViewMode::Board,
-            ViewMode::Board => ViewMode::List,
-        };
-        self.sync_board_to_list_selection();
     }
 
     fn select_board_ticket_by_id(&mut self, id: uuid::Uuid) {
@@ -4788,12 +4946,45 @@ impl App {
         self.board_rows[column] = row;
     }
 
-    fn handle_board_key(&mut self) {
+    fn handle_board_key(&mut self) -> Result<()> {
         if self.detail.is_some() {
             self.open_board_for_detail_ticket();
+        } else if self.view == ViewMode::Board {
+            self.view = ViewMode::List;
         } else {
-            self.toggle_view();
+            let selected_id = self.selected_ticket().map(|ticket| ticket.id);
+            self.view = ViewMode::Board;
+            if let Some(id) = selected_id {
+                self.select_board_ticket_by_id(id);
+            }
         }
+        Ok(())
+    }
+
+    fn handle_dashboard_key(&mut self) {
+        if self.active_tab == TuiTab::Dashboard {
+            self.active_tab = TuiTab::Issues;
+            self.view = ViewMode::List;
+            return;
+        }
+        self.active_tab = TuiTab::Dashboard;
+        self.detail = None;
+        self.writeup_detail = None;
+        self.comments_mode = false;
+    }
+
+    fn toggle_subissue_visibility(&mut self) -> Result<()> {
+        let selected_id = self.selected_ticket().map(|ticket| ticket.id);
+        self.show_subissues_preference = self.hide_subissues;
+        self.hide_subissues = !self.show_subissues_preference;
+        self.save_project_settings()?;
+        self.reload(selected_id)?;
+        self.status = Some(if self.hide_subissues {
+            "Hiding subissues.".to_string()
+        } else {
+            "Showing subissues.".to_string()
+        });
+        Ok(())
     }
 
     fn open_board_for_detail_ticket(&mut self) {
@@ -4830,9 +5021,7 @@ impl App {
         }
         if let Some(idx) = self.selected_ticket_index() {
             self.detail = Some(idx);
-            if let Some(visible_pos) = self.visible.iter().position(|visible| *visible == idx) {
-                self.list_state.select(Some(visible_pos));
-            }
+            self.select_list_ticket_by_index(idx);
             self.comments_mode = false;
             self.sync_comment_selection();
         }
@@ -4852,13 +5041,13 @@ impl App {
     }
 
     fn open_ticket_by_id(&mut self, id: uuid::Uuid) {
-        if let Some(visible_pos) = self
-            .visible
+        let list_indices = self.list_ticket_indices();
+        if let Some(list_pos) = list_indices
             .iter()
             .position(|idx| self.tickets[*idx].id == id)
         {
-            self.list_state.select(Some(visible_pos));
-            self.detail = self.visible.get(visible_pos).copied();
+            self.list_state.select(Some(list_pos));
+            self.detail = list_indices.get(list_pos).copied();
             self.comments_mode = false;
             self.sync_comment_selection();
         }
@@ -4930,9 +5119,17 @@ impl App {
 
     fn sync_board_to_list_selection(&mut self) {
         if let Some(idx) = self.selected_ticket_index() {
-            if let Some(visible_pos) = self.visible.iter().position(|visible| *visible == idx) {
-                self.list_state.select(Some(visible_pos));
-            }
+            self.select_list_ticket_by_index(idx);
+        }
+    }
+
+    fn select_list_ticket_by_index(&mut self, idx: usize) {
+        if let Some(list_pos) = self
+            .list_ticket_indices()
+            .iter()
+            .position(|candidate| *candidate == idx)
+        {
+            self.list_state.select(Some(list_pos));
         }
     }
 
@@ -5033,8 +5230,7 @@ impl App {
         }
         self.list_state
             .selected()
-            .and_then(|selected| self.visible.get(selected))
-            .copied()
+            .and_then(|selected| self.list_ticket_indices().get(selected).copied())
     }
 
     fn selected_writeup(&self) -> Option<&Writeup> {
@@ -5320,12 +5516,7 @@ fn tabs_title(active: TuiTab, title: &str) -> String {
     } else {
         " writeups "
     };
-    let dashboard = if active == TuiTab::Dashboard {
-        "[dashboard]"
-    } else {
-        " dashboard "
-    };
-    format!("{issues} {writeups} {dashboard}  {title}")
+    format!("{issues} {writeups}  {title}")
 }
 
 fn ticket_list_line(
@@ -5361,6 +5552,198 @@ fn ticket_list_line(
         width,
         has_writeups.then(|| ("[w]".to_string(), Style::default().fg(Color::Yellow))),
     )
+}
+
+fn issue_title_prefix(
+    ticket: &Ticket,
+    ticket_by_id: &HashMap<uuid::Uuid, &Ticket>,
+    show_subissue_graph: bool,
+) -> String {
+    let mut prefix = if show_subissue_graph {
+        subissue_graph_prefix(ticket, ticket_by_id)
+    } else {
+        String::new()
+    };
+    if !ticket.children.is_empty() {
+        prefix.push_str("[+] ");
+    }
+    prefix
+}
+
+fn subissue_graph_prefix(ticket: &Ticket, ticket_by_id: &HashMap<uuid::Uuid, &Ticket>) -> String {
+    let depth = subissue_depth(ticket, ticket_by_id).min(5);
+    if depth == 0 {
+        return String::new();
+    }
+
+    format!("{}╰┄ ", " ".repeat(depth))
+}
+
+fn subissue_depth(ticket: &Ticket, ticket_by_id: &HashMap<uuid::Uuid, &Ticket>) -> usize {
+    let mut depth = 0;
+    let mut current = ticket;
+    let mut seen = BTreeSet::new();
+    while let Some(parent) = current.parent {
+        if !seen.insert(parent) {
+            break;
+        }
+        let Some(parent_ticket) = ticket_by_id.get(&parent).copied() else {
+            break;
+        };
+        depth += 1;
+        current = parent_ticket;
+    }
+    depth
+}
+
+fn ordered_list_indices(tickets: &[Ticket], visible: &[usize], show_subissues: bool) -> Vec<usize> {
+    if !show_subissues {
+        return visible.to_vec();
+    }
+    build_outline_rows(tickets, visible, &BTreeSet::new())
+        .into_iter()
+        .map(|row| row.ticket_idx)
+        .collect()
+}
+
+fn build_outline_rows(
+    tickets: &[Ticket],
+    visible: &[usize],
+    collapsed: &BTreeSet<uuid::Uuid>,
+) -> Vec<OutlineRow> {
+    let visible_set = visible.iter().copied().collect::<BTreeSet<_>>();
+    let visible_order = visible
+        .iter()
+        .enumerate()
+        .map(|(order, idx)| (*idx, order))
+        .collect::<HashMap<_, _>>();
+    let index_by_id = tickets
+        .iter()
+        .enumerate()
+        .map(|(idx, ticket)| (ticket.id, idx))
+        .collect::<HashMap<_, _>>();
+
+    let mut roots = Vec::new();
+    let mut children_by_parent = HashMap::<uuid::Uuid, Vec<usize>>::new();
+    for &idx in visible {
+        let Some(ticket) = tickets.get(idx) else {
+            continue;
+        };
+        if let Some(parent) = ticket.parent {
+            if index_by_id
+                .get(&parent)
+                .is_some_and(|parent_idx| visible_set.contains(parent_idx))
+            {
+                children_by_parent.entry(parent).or_default().push(idx);
+                continue;
+            }
+        }
+        roots.push(idx);
+    }
+
+    roots.sort_by_key(|idx| visible_order.get(idx).copied().unwrap_or(usize::MAX));
+    for children in children_by_parent.values_mut() {
+        children.sort_by_key(|idx| visible_order.get(idx).copied().unwrap_or(usize::MAX));
+    }
+
+    let mut rows = Vec::new();
+    let mut visited = BTreeSet::<uuid::Uuid>::new();
+    for idx in roots {
+        push_outline_row(
+            tickets,
+            idx,
+            0,
+            collapsed,
+            &children_by_parent,
+            &mut visited,
+            &mut rows,
+        );
+    }
+    for &idx in visible {
+        let Some(ticket) = tickets.get(idx) else {
+            continue;
+        };
+        if visited.contains(&ticket.id) {
+            continue;
+        }
+        push_outline_row(
+            tickets,
+            idx,
+            0,
+            collapsed,
+            &children_by_parent,
+            &mut visited,
+            &mut rows,
+        );
+    }
+
+    rows
+}
+
+fn push_outline_row(
+    tickets: &[Ticket],
+    idx: usize,
+    depth: usize,
+    collapsed: &BTreeSet<uuid::Uuid>,
+    children_by_parent: &HashMap<uuid::Uuid, Vec<usize>>,
+    visited: &mut BTreeSet<uuid::Uuid>,
+    rows: &mut Vec<OutlineRow>,
+) {
+    let Some(ticket) = tickets.get(idx) else {
+        return;
+    };
+    if !visited.insert(ticket.id) {
+        return;
+    }
+
+    let children = children_by_parent.get(&ticket.id);
+    let has_children = children.is_some_and(|children| !children.is_empty());
+    let is_collapsed = collapsed.contains(&ticket.id);
+    rows.push(OutlineRow {
+        ticket_idx: idx,
+        depth,
+        has_children,
+        collapsed: is_collapsed,
+    });
+
+    if is_collapsed {
+        if let Some(children) = children {
+            mark_outline_descendants_visited(tickets, children, children_by_parent, visited);
+        }
+        return;
+    }
+    if let Some(children) = children {
+        for &child in children {
+            push_outline_row(
+                tickets,
+                child,
+                depth + 1,
+                collapsed,
+                children_by_parent,
+                visited,
+                rows,
+            );
+        }
+    }
+}
+
+fn mark_outline_descendants_visited(
+    tickets: &[Ticket],
+    children: &[usize],
+    children_by_parent: &HashMap<uuid::Uuid, Vec<usize>>,
+    visited: &mut BTreeSet<uuid::Uuid>,
+) {
+    for &child in children {
+        let Some(ticket) = tickets.get(child) else {
+            continue;
+        };
+        if !visited.insert(ticket.id) {
+            continue;
+        }
+        if let Some(grandchildren) = children_by_parent.get(&ticket.id) {
+            mark_outline_descendants_visited(tickets, grandchildren, children_by_parent, visited);
+        }
+    }
 }
 
 fn issue_columns_for_width(columns: &[IssueColumn], width: usize) -> Vec<IssueColumn> {
@@ -5439,6 +5822,7 @@ fn ticket_table_line(
     columns: &[IssueColumn],
     widths: &[usize],
     width: usize,
+    title_prefix: &str,
     _compact: bool,
     current_user: &str,
     closed_at: Option<OffsetDateTime>,
@@ -5457,6 +5841,9 @@ fn ticket_table_line(
                 ticket.assigned.as_deref() == Some(current_user),
             ),
             IssueColumn::Tags => push_issue_tags_column(&mut spans, &ticket.tags, *column_width),
+            IssueColumn::Title => {
+                push_issue_title_column(&mut spans, ticket, *column_width, title_prefix);
+            }
             _ => {
                 let (value, style) = issue_column_value(ticket, *column, closed_at, current_user);
                 spans.push(Span::styled(fit_display(&value, *column_width), style));
@@ -5502,6 +5889,28 @@ fn push_issue_id_column(
     if padding_width > 0 {
         spans.push(Span::raw(" ".repeat(padding_width)));
     }
+}
+
+fn push_issue_title_column(
+    spans: &mut Vec<Span<'static>>,
+    ticket: &Ticket,
+    width: usize,
+    title_prefix: &str,
+) {
+    if title_prefix.is_empty() {
+        let (value, style) = issue_column_value(ticket, IssueColumn::Title, None, "");
+        spans.push(Span::styled(fit_display(&value, width), style));
+        return;
+    }
+
+    let prefix = truncate_display(title_prefix, width);
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+    spans.push(Span::styled(prefix, Style::default().fg(Color::DarkGray)));
+    let title = flatten_display(&ticket.title);
+    spans.push(Span::styled(
+        fit_display(&title, width.saturating_sub(prefix_width)),
+        Style::default().fg(Color::Reset),
+    ));
 }
 
 fn push_issue_tags_column(spans: &mut Vec<Span<'static>>, tags: &BTreeSet<String>, width: usize) {
@@ -6379,7 +6788,6 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
             name: "Default".to_string(),
             view: SavedView {
                 status: Some("open".to_string()),
-                subissues: true,
                 tag_match_all: true,
                 columns: default_issue_column_names(),
                 ..Default::default()
@@ -6391,7 +6799,6 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
             view: SavedView {
                 status: Some("open".to_string()),
                 assigned: Some(current_user.to_string()),
-                subissues: true,
                 tag_match_all: true,
                 columns: default_issue_column_names(),
                 ..Default::default()
@@ -6403,7 +6810,6 @@ fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
             view: SavedView {
                 status: Some("closed".to_string()),
                 order: Some("closed.desc".to_string()),
-                subissues: true,
                 tag_match_all: true,
                 columns: vec![
                     "id".to_string(),
@@ -6667,6 +7073,13 @@ fn field_line(label: &str, value: &str) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" : ", Style::default().fg(Color::DarkGray)),
+        Span::styled(value.to_string(), Style::default().fg(Color::Cyan)),
+    ])
+}
+
+fn detail_child_issue_line(value: &str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw(" ".repeat(13)),
         Span::styled(value.to_string(), Style::default().fg(Color::Cyan)),
     ])
 }
@@ -7077,6 +7490,16 @@ mod tests {
     }
 
     #[test]
+    fn default_open_views_hide_subissues() {
+        let views = builtin_views("me@example.com");
+
+        for name in ["Default", "Mine", "Recently Closed"] {
+            let view = views.iter().find(|view| view.name == name).unwrap();
+            assert!(!view.view.subissues, "{name} should hide subissues");
+        }
+    }
+
+    #[test]
     fn id_column_reserves_space_for_claimed_marker() {
         assert_eq!(IssueColumn::Id.fixed_width(), Some(4));
     }
@@ -7091,5 +7514,143 @@ mod tests {
 
         assert_eq!(spans_width(&spans), 8);
         assert!(spans.iter().any(|span| span.content.as_ref() == "bug"));
+    }
+
+    #[test]
+    fn outline_rows_indent_visible_subissues() {
+        let root = uuid::Uuid::from_u128(1);
+        let child = uuid::Uuid::from_u128(2);
+        let grandchild = uuid::Uuid::from_u128(3);
+        let sibling = uuid::Uuid::from_u128(4);
+        let tickets = vec![
+            test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[grandchild]),
+            test_ticket(grandchild, Some(child), &[]),
+            test_ticket(sibling, None, &[]),
+        ];
+
+        let rows = build_outline_rows(&tickets, &[0, 1, 2, 3], &BTreeSet::new());
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (tickets[row.ticket_idx].id, row.depth, row.has_children))
+                .collect::<Vec<_>>(),
+            vec![
+                (root, 0, true),
+                (child, 1, true),
+                (grandchild, 2, false),
+                (sibling, 0, false)
+            ]
+        );
+    }
+
+    #[test]
+    fn outline_rows_hide_descendants_under_collapsed_parent() {
+        let root = uuid::Uuid::from_u128(1);
+        let child = uuid::Uuid::from_u128(2);
+        let sibling = uuid::Uuid::from_u128(3);
+        let tickets = vec![
+            test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[]),
+            test_ticket(sibling, None, &[]),
+        ];
+        let collapsed = BTreeSet::from([root]);
+
+        let rows = build_outline_rows(&tickets, &[0, 1, 2], &collapsed);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (tickets[row.ticket_idx].id, row.depth, row.collapsed))
+                .collect::<Vec<_>>(),
+            vec![(root, 0, true), (sibling, 0, false)]
+        );
+    }
+
+    #[test]
+    fn subissue_graph_prefix_marks_parents_and_children() {
+        let root = uuid::Uuid::from_u128(1);
+        let child = uuid::Uuid::from_u128(2);
+        let grandchild = uuid::Uuid::from_u128(3);
+        let tickets = vec![
+            test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[grandchild]),
+            test_ticket(grandchild, Some(child), &[]),
+        ];
+        let ticket_by_id = tickets
+            .iter()
+            .map(|ticket| (ticket.id, ticket))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(subissue_graph_prefix(&tickets[0], &ticket_by_id), "");
+        assert_eq!(subissue_graph_prefix(&tickets[1], &ticket_by_id), " ╰┄ ");
+        assert_eq!(subissue_graph_prefix(&tickets[2], &ticket_by_id), "  ╰┄ ");
+    }
+
+    #[test]
+    fn issue_title_prefix_marks_parents_even_when_graph_is_hidden() {
+        let root = uuid::Uuid::from_u128(1);
+        let child = uuid::Uuid::from_u128(2);
+        let tickets = vec![
+            test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[]),
+        ];
+        let ticket_by_id = tickets
+            .iter()
+            .map(|ticket| (ticket.id, ticket))
+            .collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            issue_title_prefix(&tickets[0], &ticket_by_id, false),
+            "[+] "
+        );
+        assert_eq!(issue_title_prefix(&tickets[1], &ticket_by_id, false), "");
+        assert_eq!(issue_title_prefix(&tickets[1], &ticket_by_id, true), " ╰┄ ");
+    }
+
+    #[test]
+    fn list_order_places_visible_children_after_parent() {
+        let root = uuid::Uuid::from_u128(1);
+        let child = uuid::Uuid::from_u128(2);
+        let sibling = uuid::Uuid::from_u128(3);
+        let tickets = vec![
+            test_ticket(root, None, &[child]),
+            test_ticket(child, Some(root), &[]),
+            test_ticket(sibling, None, &[]),
+        ];
+
+        assert_eq!(
+            ordered_list_indices(&tickets, &[1, 0, 2], false),
+            vec![1, 0, 2]
+        );
+        assert_eq!(
+            ordered_list_indices(&tickets, &[1, 0, 2], true),
+            vec![0, 1, 2]
+        );
+    }
+
+    fn test_ticket(id: uuid::Uuid, parent: Option<uuid::Uuid>, children: &[uuid::Uuid]) -> Ticket {
+        Ticket {
+            id,
+            title: format!("Ticket {id}"),
+            description: None,
+            spec: None,
+            status: TicketStatus::Open,
+            state: TicketState::New,
+            assigned: None,
+            closed_by: None,
+            priority: None,
+            points: None,
+            milestone: None,
+            code: None,
+            parent,
+            children: children.iter().copied().collect(),
+            depends_on: BTreeSet::new(),
+            blocks: BTreeSet::new(),
+            tags: BTreeSet::new(),
+            meta: BTreeMap::new(),
+            comments: Vec::new(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            created_by: "test@example.com".to_string(),
+        }
     }
 }
