@@ -154,6 +154,25 @@
           </div>
         </div>
 
+        <h2>Import from Linear</h2>
+        <p>Pull issues from a Linear team into TicGit. Requires a Linear API key (set <code>LINEAR_API_KEY</code> in your environment).</p>
+
+        <div class="terminal dark">
+          <div class="term-header"><span>LINEAR IMPORT</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti import linear --team ENG</div>
+            <div class="line dim">Imported issues from Linear team ENG.</div>
+          </div>
+        </div>
+
+        <p>Omit <code>--team</code> to list available teams:</p>
+        <div class="terminal">
+          <div class="term-header"><span>LIST TEAMS</span></div>
+          <div class="term-body">
+            <div class="line"><span class="prompt">$</span> ti import linear</div>
+          </div>
+        </div>
+
         <footer class="doc-footer">
           <span>$ cargo install ticgit</span>
           <span><a href="https://github.com/schacon/ticgit">github</a> &middot; <a href="https://github.com/schacon/ticgit/releases">changelog</a></span>
