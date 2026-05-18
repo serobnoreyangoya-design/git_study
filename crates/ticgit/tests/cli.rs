@@ -69,6 +69,119 @@ fn create_ticket(repo: &TestRepo, title: &str) -> String {
     String::from_utf8(output).unwrap().trim().to_string()
 }
 
+#[test]
+fn review_cli_records_branch_review_flow() {
+    let repo = TestRepo::new();
+    let ticket_id = create_ticket(&repo, "Code review tooling");
+
+    repo.ti()
+        .args([
+            "review",
+            "new",
+            "--branch",
+            "main",
+            "--ticket",
+            &ticket_id,
+            "--title",
+            "Stable review title",
+            "--description",
+            "Stable review description",
+            "--reviewer",
+            "alice@example.com",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created review main@"))
+        .stdout(predicate::str::contains("Stable review title"));
+
+    repo.ti()
+        .args(["review", "list", "--status", "open"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"))
+        .stdout(predicate::str::contains("open"))
+        .stdout(predicate::str::contains("Stable review title"));
+
+    fs::write(
+        repo.dir.path().join("review.txt"),
+        "updated review content\n",
+    )
+    .expect("write file");
+    git(repo.dir.path(), &["add", "review.txt"]);
+    git(
+        repo.dir.path(),
+        &["commit", "-m", "Last commit message", "--quiet"],
+    );
+    repo.ti()
+        .args(["review", "update", "main"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated review main@"));
+
+    repo.ti()
+        .args(["review", "show", "main"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Title: Stable review title"))
+        .stdout(predicate::str::contains(
+            "Description: Stable review description",
+        ))
+        .stdout(predicate::str::contains("Last commit message").not());
+
+    repo.ti()
+        .args(["review", "add-reviewer", "bob@example.com"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added reviewer bob@example.com"));
+
+    repo.ti()
+        .args([
+            "review",
+            "comment",
+            "--path",
+            "src/parser.rs",
+            "--line",
+            "42",
+            "needs bounds checking",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Added comment"));
+
+    repo.ti()
+        .args(["review", "request-changes", "needs error handling"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Requested changes"));
+
+    repo.ti()
+        .args(["review", "approve", "--comment", "looks good"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Approved main@"));
+
+    let head = git_output(repo.dir.path(), &["rev-parse", "HEAD"]);
+    repo.ti()
+        .args(["review", "integrate", &head])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Integrated main@"));
+
+    repo.ti()
+        .args(["review", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Status: merged"))
+        .stdout(predicate::str::contains("Tickets:"))
+        .stdout(predicate::str::contains("alice@example.com"))
+        .stdout(predicate::str::contains("bob@example.com"))
+        .stdout(predicate::str::contains("[comment]"))
+        .stdout(predicate::str::contains("src/parser.rs:42"))
+        .stdout(predicate::str::contains("[changes-requested]"))
+        .stdout(predicate::str::contains("[approval]"))
+        .stdout(predicate::str::contains("looks good"));
+}
+
 #[cfg(unix)]
 fn editor_script(repo: &TestRepo, contents: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
@@ -1239,6 +1352,48 @@ fn writeup_edit_editor_uses_first_line_as_title() {
         .stdout(predicate::str::contains("# Writeup: Updated title"))
         .stdout(predicate::str::contains("Updated body"))
         .stdout(predicate::str::contains("Updated title\n\nUpdated title").not())
+        .stdout(predicate::str::contains("Original body").not());
+}
+
+#[cfg(unix)]
+#[test]
+fn writeup_edit_editor_preserves_markdown_headings() {
+    let repo = TestRepo::new();
+    let output = repo
+        .ti()
+        .args([
+            "writeup",
+            "new",
+            "--title",
+            "Original title",
+            "--body",
+            "Original body",
+            "--id-only",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let writeup = String::from_utf8(output).unwrap().trim().to_string();
+    let writeup_prefix = &writeup[..6];
+    let editor = editor_script(
+        &repo,
+        "Updated title\n\n# First heading\n\nBody\n\n## Second heading",
+    );
+
+    repo.ti()
+        .env("EDITOR", editor)
+        .args(["writeup", "edit", writeup_prefix])
+        .assert()
+        .success();
+
+    repo.ti()
+        .args(["writeup", "show", writeup_prefix])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# First heading"))
+        .stdout(predicate::str::contains("## Second heading"))
         .stdout(predicate::str::contains("Original body").not());
 }
 

@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
 use std::io::{self, Stdout};
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -20,10 +23,16 @@ use ratatui::widgets::{
     Block, Borders, Clear, Gauge, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
 };
 use ratatui::{Frame, Terminal};
+use serde::{Deserialize, Serialize};
+use syntect::easy::HighlightLines;
+use syntect::highlighting::{Style as SyntectStyle, ThemeSet};
+use syntect::parsing::SyntaxSet;
 use ticgit_lib::{
-    query, Comment, Filter, NewTicketOpts, NewWriteupOpts, SortKey, SortOrder, Ticket,
-    TicketLifecycle, TicketState, TicketStatus, TicketStore, Writeup, WriteupStatus,
+    keys, query, Comment, Filter, MetaValue, NewTicketOpts, NewWriteupOpts, SortKey, SortOrder,
+    Target, Ticket, TicketLifecycle, TicketState, TicketStatus, TicketStore, Writeup,
+    WriteupStatus,
 };
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -176,16 +185,38 @@ struct App {
     visible: Vec<usize>,
     writeups: Vec<Writeup>,
     visible_writeups: Vec<usize>,
+    ticket_reviews: HashMap<uuid::Uuid, TicketReview>,
+    review_commit_cache: HashMap<String, ReviewCommitInfo>,
+    review_commit_info_sender: Sender<ReviewCommitInfoLoad>,
+    review_commit_info_receiver: Receiver<ReviewCommitInfoLoad>,
+    review_commit_info_inflight: BTreeSet<String>,
+    review_status_cache: HashMap<String, CommitReviewStatus>,
+    review_patch_cache: HashMap<String, Vec<String>>,
+    review_file_count_cache: HashMap<String, usize>,
+    review_diff_render_cache: HashMap<String, ReviewDiffRender>,
+    review_diff_scroll: u16,
+    review_diff_page_height: u16,
+    review_diff_line_focus: u16,
+    review_collapsed_diff_files: HashMap<String, BTreeSet<String>>,
+    review_diff_file_state: ListState,
+    review_diff_toc_open: bool,
+    review_diff_toc_state: ListState,
+    review_commit_pane_focus: ReviewCommitPaneFocus,
+    review_discussion_scroll: u16,
+    review_discussion_page_height: u16,
     list_state: ListState,
     writeup_state: ListState,
+    review_state: ListState,
     board_column: usize,
     board_rows: [usize; BOARD_STATES.len()],
     view: ViewMode,
     active_tab: TuiTab,
     show_all_writeups: bool,
+    show_all_reviews: bool,
     active_view_name: Option<String>,
     saved_view_state: ListState,
     pending_delete_view: Option<String>,
+    pending_close_review: Option<(uuid::Uuid, String)>,
     base_status: Option<TicketStatus>,
     base_state: Option<TicketState>,
     assigned_filter: Option<String>,
@@ -202,6 +233,9 @@ struct App {
     tag_picker_state: ListState,
     manage_tag_state: ListState,
     link_issue_state: ListState,
+    review_commit_state: ListState,
+    review_branch_state: ListState,
+    review_branch_choices: Vec<ReviewBranchChoice>,
     writeup_toc_state: ListState,
     version_state: ListState,
     order_state: ListState,
@@ -211,6 +245,8 @@ struct App {
     new_ticket: NewTicketDraft,
     detail: Option<usize>,
     writeup_detail: Option<usize>,
+    review_detail: Option<usize>,
+    review_mode: ReviewMode,
     writeup_detail_focus: WriteupPaneFocus,
     writeup_detail_scroll: u16,
     writeup_toc_open: bool,
@@ -233,6 +269,7 @@ enum ViewMode {
 enum TuiTab {
     Issues,
     Writeups,
+    Reviews,
     Dashboard,
 }
 
@@ -242,6 +279,22 @@ enum WriteupPaneFocus {
     List,
     Detail,
     Toc,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ReviewMode {
+    #[default]
+    Summary,
+    Commits,
+    Commit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ReviewCommitPaneFocus {
+    Toc,
+    #[default]
+    Diff,
+    Comments,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +340,140 @@ struct WriteupBodyStats {
     headings: usize,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TicketReview {
+    branch_id: String,
+    branch_name: Option<String>,
+    title: String,
+    description: String,
+    status: String,
+    head_sha: Option<String>,
+    revisions: Vec<String>,
+    revision_changes: Vec<ReviewRevisionChange>,
+    messages: Vec<ReviewMessageView>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+struct ReviewRevisionChange {
+    sha: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewBranchChoice {
+    name: String,
+    last_commit_at: Option<OffsetDateTime>,
+    commits_ahead: Option<i64>,
+    author: String,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewCommitInfoLoad {
+    sha: String,
+    info: ReviewCommitInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButBranchList {
+    #[serde(default, rename = "appliedStacks")]
+    applied_stacks: Vec<ButAppliedStack>,
+    #[serde(default)]
+    branches: Vec<ButBranch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButAppliedStack {
+    #[serde(default)]
+    heads: Vec<ButBranch>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButBranch {
+    name: String,
+    #[serde(default, rename = "lastCommitAt")]
+    last_commit_at: Option<i64>,
+    #[serde(default, rename = "commitsAhead")]
+    commits_ahead: Option<i64>,
+    #[serde(default, rename = "lastAuthor")]
+    last_author: Option<ButAuthor>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButAuthor {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButBranchShow {
+    #[serde(default)]
+    commits: Vec<ButBranchCommit>,
+    #[serde(default, rename = "baseCommit")]
+    base_commit: Option<ButBranchBaseCommit>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButBranchCommit {
+    sha: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ButBranchBaseCommit {
+    sha: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewBranchSnapshot {
+    base_sha: String,
+    head_sha: String,
+    commits: Vec<String>,
+    title: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+struct ReviewMessageView {
+    author: String,
+    body: String,
+    #[serde(rename = "type")]
+    message_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lines: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct CommitReviewStatus {
+    reviewed: BTreeSet<String>,
+    approvals: BTreeSet<String>,
+    signed_off: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+struct ReviewCommitInfo {
+    subject: String,
+    body: String,
+    author: String,
+    updated: String,
+    shortstat: String,
+    change_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ReviewDiffRender {
+    line_count: usize,
+    spans: Arc<Vec<DiffFileSpan>>,
+    toc_entries: Arc<Vec<DiffTocEntry>>,
+    files: Arc<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
@@ -297,9 +484,12 @@ enum Mode {
     Columns,
     SavedViews,
     ConfirmDeleteView,
+    ConfirmCloseReview,
+    ConfirmApproveReview,
     SaveView,
     LinkIssueSearch,
     UnlinkIssueSelect,
+    ReviewBranchPicker,
     Versions,
     Input(InputKind),
     State,
@@ -398,6 +588,7 @@ impl App {
             .unwrap_or(DETAIL_WIDTH_PERCENT_DEFAULT)
             .clamp(DETAIL_WIDTH_PERCENT_MIN, DETAIL_WIDTH_PERCENT_MAX);
         let show_subissues_preference = project_settings.show_subissues.unwrap_or(false);
+        let (review_commit_info_sender, review_commit_info_receiver) = mpsc::channel();
         let mut app = Self {
             store,
             all_tickets: Vec::new(),
@@ -405,16 +596,38 @@ impl App {
             visible: Vec::new(),
             writeups: Vec::new(),
             visible_writeups: Vec::new(),
+            ticket_reviews: HashMap::new(),
+            review_commit_cache: HashMap::new(),
+            review_commit_info_sender,
+            review_commit_info_receiver,
+            review_commit_info_inflight: BTreeSet::new(),
+            review_status_cache: HashMap::new(),
+            review_patch_cache: HashMap::new(),
+            review_file_count_cache: HashMap::new(),
+            review_diff_render_cache: HashMap::new(),
+            review_diff_scroll: 0,
+            review_diff_page_height: 20,
+            review_diff_line_focus: 0,
+            review_collapsed_diff_files: HashMap::new(),
+            review_diff_file_state: ListState::default(),
+            review_diff_toc_open: false,
+            review_diff_toc_state: ListState::default(),
+            review_commit_pane_focus: ReviewCommitPaneFocus::Diff,
+            review_discussion_scroll: 0,
+            review_discussion_page_height: 20,
             list_state: ListState::default(),
             writeup_state: ListState::default(),
+            review_state: ListState::default(),
             board_column: 0,
             board_rows: [0; BOARD_STATES.len()],
             view: ViewMode::List,
             active_tab: TuiTab::Issues,
             show_all_writeups: false,
+            show_all_reviews: false,
             active_view_name: None,
             saved_view_state: ListState::default(),
             pending_delete_view: None,
+            pending_close_review: None,
             base_status: Some(TicketStatus::Open),
             base_state: None,
             assigned_filter: None,
@@ -431,6 +644,9 @@ impl App {
             tag_picker_state: ListState::default(),
             manage_tag_state: ListState::default(),
             link_issue_state: ListState::default(),
+            review_commit_state: ListState::default(),
+            review_branch_state: ListState::default(),
+            review_branch_choices: Vec::new(),
             writeup_toc_state: ListState::default(),
             version_state: ListState::default(),
             order_state: ListState::default(),
@@ -440,6 +656,8 @@ impl App {
             new_ticket: NewTicketDraft::default(),
             detail: None,
             writeup_detail: None,
+            review_detail: None,
+            review_mode: ReviewMode::Summary,
             writeup_detail_focus: WriteupPaneFocus::List,
             writeup_detail_scroll: 0,
             writeup_toc_open: false,
@@ -459,6 +677,8 @@ impl App {
         let tickets = self.store.list()?;
         self.closed_at = load_closed_times(&self.store.session().repo_git_dir(), &tickets);
         self.all_tickets = tickets.clone();
+        self.ticket_reviews = load_ticket_reviews(&self.store, &tickets).unwrap_or_default();
+        self.review_status_cache = load_review_status_cache(&self.store, &self.ticket_reviews);
         self.tickets = query::apply(
             tickets,
             &Filter {
@@ -500,6 +720,7 @@ impl App {
             }
         }
         self.sync_comment_selection();
+        self.sync_review_selection();
 
         Ok(())
     }
@@ -545,6 +766,7 @@ impl App {
     fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         loop {
             self.poll_sync()?;
+            self.poll_review_commit_info_loads();
             terminal.draw(|frame| self.draw(frame))?;
 
             if !event::poll(Duration::from_millis(250))? {
@@ -606,6 +828,26 @@ impl App {
                 .split(outer[0]);
             self.draw_writeup_list(frame, panes[0]);
             self.draw_writeup_detail(frame, panes[1]);
+        } else if self.active_tab == TuiTab::Reviews
+            && self.review_detail.is_some()
+            && self.review_mode == ReviewMode::Summary
+        {
+            let list_width = 100_u16.saturating_sub(self.detail_width_percent);
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(list_width),
+                    Constraint::Percentage(self.detail_width_percent),
+                ])
+                .split(outer[0]);
+            self.draw_review_list(frame, panes[0]);
+            self.draw_review_detail(frame, panes[1]);
+        } else if self.active_tab == TuiTab::Reviews && self.review_detail.is_some() {
+            match self.review_mode {
+                ReviewMode::Summary => {}
+                ReviewMode::Commits => self.draw_review_commit_list_mode(frame, outer[0]),
+                ReviewMode::Commit => self.draw_review_commit_mode(frame, outer[0]),
+            }
         } else {
             match self.active_tab {
                 TuiTab::Issues => match self.view {
@@ -613,6 +855,7 @@ impl App {
                     ViewMode::Board => self.draw_board(frame, outer[0]),
                 },
                 TuiTab::Writeups => self.draw_writeup_list(frame, outer[0]),
+                TuiTab::Reviews => self.draw_review_list(frame, outer[0]),
                 TuiTab::Dashboard => self.draw_dashboard(frame, outer[0]),
             }
         }
@@ -630,9 +873,12 @@ impl App {
             Mode::Columns => self.draw_columns_modal(frame),
             Mode::SavedViews => self.draw_saved_views_modal(frame),
             Mode::ConfirmDeleteView => self.draw_delete_view_confirm_modal(frame),
+            Mode::ConfirmCloseReview => self.draw_close_review_confirm_modal(frame),
+            Mode::ConfirmApproveReview => self.draw_approve_review_confirm_modal(frame),
             Mode::SaveView => self.draw_save_view_modal(frame),
             Mode::LinkIssueSearch => self.draw_link_issue_search_modal(frame),
             Mode::UnlinkIssueSelect => self.draw_unlink_issue_select_modal(frame),
+            Mode::ReviewBranchPicker => self.draw_review_branch_picker_modal(frame),
             Mode::Versions => self.draw_versions_modal(frame),
             Mode::Input(kind) => self.draw_input_modal(frame, kind),
             Mode::State => self.draw_state_modal(frame),
@@ -826,6 +1072,40 @@ impl App {
                     },
                 ],
             ),
+            Mode::ConfirmCloseReview => (
+                "close review",
+                self.pending_close_review
+                    .as_ref()
+                    .map(|(_, branch_id)| branch_id.clone()),
+                vec![
+                    MenuHint {
+                        key: "y",
+                        desc: "close",
+                    },
+                    MenuHint {
+                        key: "n/Esc",
+                        desc: "cancel",
+                    },
+                ],
+            ),
+            Mode::ConfirmApproveReview => (
+                "approve commit",
+                None,
+                vec![
+                    MenuHint {
+                        key: "a",
+                        desc: "approve",
+                    },
+                    MenuHint {
+                        key: "c",
+                        desc: "comment",
+                    },
+                    MenuHint {
+                        key: "Esc",
+                        desc: "cancel",
+                    },
+                ],
+            ),
             Mode::SaveView => (
                 "save view",
                 (!self.input.is_empty()).then(|| self.input.clone()),
@@ -885,6 +1165,24 @@ impl App {
                     MenuHint {
                         key: "Enter",
                         desc: "unlink",
+                    },
+                    MenuHint {
+                        key: "Esc",
+                        desc: "cancel",
+                    },
+                ],
+            ),
+            Mode::ReviewBranchPicker => (
+                "new review",
+                None,
+                vec![
+                    MenuHint {
+                        key: "j/k",
+                        desc: "branch",
+                    },
+                    MenuHint {
+                        key: "Enter",
+                        desc: "create",
                     },
                     MenuHint {
                         key: "Esc",
@@ -1143,6 +1441,104 @@ impl App {
                             desc: "quit",
                         },
                     ]
+                } else if self.active_tab == TuiTab::Reviews {
+                    let enter_hint = match (self.review_detail.is_some(), self.review_mode) {
+                        (false, _) => "details",
+                        (true, ReviewMode::Summary) => "commits",
+                        (true, ReviewMode::Commits) => "commit",
+                        (true, ReviewMode::Commit) => "commit",
+                    };
+                    if self.review_mode == ReviewMode::Commit {
+                        vec![
+                            MenuHint {
+                                key: "j/k",
+                                desc: "scroll",
+                            },
+                            MenuHint {
+                                key: "h/l",
+                                desc: "commit",
+                            },
+                            MenuHint {
+                                key: "Space",
+                                desc: "page",
+                            },
+                            MenuHint {
+                                key: "f/F",
+                                desc: "fold",
+                            },
+                            MenuHint {
+                                key: "t",
+                                desc: "contents",
+                            },
+                            MenuHint {
+                                key: "c/R/a",
+                                desc: "review",
+                            },
+                            MenuHint {
+                                key: "Esc",
+                                desc: "commits",
+                            },
+                            MenuHint {
+                                key: "q",
+                                desc: "quit",
+                            },
+                        ]
+                    } else {
+                        vec![
+                            MenuHint {
+                                key: "Tab",
+                                desc: "issues",
+                            },
+                            MenuHint {
+                                key: "j/k",
+                                desc: "reviews",
+                            },
+                            MenuHint {
+                                key: "Enter",
+                                desc: enter_hint,
+                            },
+                            MenuHint {
+                                key: "n",
+                                desc: "new",
+                            },
+                            MenuHint {
+                                key: "a",
+                                desc: "all/open",
+                            },
+                            MenuHint {
+                                key: "c/o",
+                                desc: "close/open",
+                            },
+                            MenuHint {
+                                key: "e",
+                                desc: "edit",
+                            },
+                            MenuHint {
+                                key: "+/-",
+                                desc: "resize",
+                            },
+                            MenuHint {
+                                key: "Esc",
+                                desc: "close",
+                            },
+                            MenuHint {
+                                key: "/",
+                                desc: "search",
+                            },
+                            MenuHint {
+                                key: "g",
+                                desc: "filter tags",
+                            },
+                            MenuHint {
+                                key: "r",
+                                desc: "refresh",
+                            },
+                            MenuHint {
+                                key: "q",
+                                desc: "quit",
+                            },
+                        ]
+                    }
                 } else if self.view == ViewMode::Board && self.detail.is_none() {
                     vec![
                         MenuHint {
@@ -1380,12 +1776,12 @@ impl App {
         } else {
             format!("{scope} matching {filter} ({count})")
         };
-        let title = tabs_title(self.active_tab, &title);
-
-        let block = Block::default().borders(Borders::ALL).title(title);
-        let inner = block.inner(area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(tabs_title(self.active_tab, ""))
+            .title(view_state_title(title));
         let row_width =
-            usize::from(inner.width).saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
+            table_row_width(area, &block).saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
         let compact = self.detail.is_some();
         let columns = issue_columns_for_width(&self.issue_columns, row_width);
         let widths = issue_column_widths(&columns, row_width);
@@ -1415,25 +1811,17 @@ impl App {
             })
             .collect();
 
-        frame.render_widget(block, area);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(0)])
-            .split(inner);
-        frame.render_widget(
-            Paragraph::new(issue_table_header(&columns, &widths, row_width)),
-            chunks[0],
+        let body = render_table_list_frame(
+            frame,
+            area,
+            block,
+            issue_table_header(&columns, &widths, row_width),
         );
         let list = List::new(items)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Rgb(0, 0, 95))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(list_highlight_style())
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
-        frame.render_stateful_widget(list, chunks[1], &mut self.list_state);
+        frame.render_stateful_widget(list, body, &mut self.list_state);
     }
 
     fn draw_issue_view(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1456,7 +1844,8 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(tabs_title(self.active_tab, &title))
+            .title(tabs_title(self.active_tab, ""))
+            .title(view_state_title(title))
             .border_style(
                 if self.writeup_detail.is_some()
                     && self.writeup_detail_focus == WriteupPaneFocus::List
@@ -1466,9 +1855,11 @@ impl App {
                     Style::default()
                 },
             );
-        let row_width = usize::from(block.inner(area).width)
-            .saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
+        let row_width =
+            table_row_width(area, &block).saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
         let compact = self.writeup_detail.is_some();
+        let body =
+            render_table_list_frame(frame, area, block, writeup_table_header(row_width, compact));
 
         let items: Vec<ListItem<'_>> = if self.visible_writeups.is_empty() {
             vec![ListItem::new(Line::from(Span::styled(
@@ -1490,16 +1881,68 @@ impl App {
         };
 
         let list = List::new(items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Rgb(0, 0, 95))
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(list_highlight_style())
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
-        frame.render_stateful_widget(list, area, &mut self.writeup_state);
+        frame.render_stateful_widget(list, body, &mut self.writeup_state);
+    }
+
+    fn draw_review_list(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let indices = self.review_ticket_indices();
+        let count = indices.len();
+        let scope = if self.show_all_reviews {
+            "All reviews"
+        } else {
+            "Open reviews"
+        };
+        let title = if self.filter.is_empty() {
+            format!("{scope} ({count})")
+        } else {
+            format!("{scope} matching \"{}\" ({count})", self.filter)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(tabs_title(self.active_tab, ""))
+            .title(view_state_title(title));
+        let row_width =
+            table_row_width(area, &block).saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
+        let body = render_table_list_frame(frame, area, block, review_table_header(row_width));
+        let items: Vec<ListItem<'_>> = if indices.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                if self.show_all_reviews {
+                    "No tickets with connected review branches."
+                } else {
+                    "No open tickets with connected review branches. Press a to show all."
+                },
+                Style::default().fg(Color::DarkGray),
+            )))]
+        } else {
+            indices
+                .iter()
+                .map(|&idx| {
+                    let ticket = self.all_tickets[idx].clone();
+                    let review = self.ticket_reviews.get(&ticket.id).cloned();
+                    let updated = review
+                        .as_ref()
+                        .and_then(|review| review.head_sha.as_deref())
+                        .map(|sha| self.review_commit_updated_or_queue(sha))
+                        .filter(|updated| !updated.is_empty())
+                        .unwrap_or_else(|| "-".to_string());
+                    ListItem::new(review_ticket_lines(
+                        &ticket,
+                        review.as_ref(),
+                        &updated,
+                        row_width,
+                    ))
+                })
+                .collect()
+        };
+
+        let list = List::new(items)
+            .highlight_style(list_highlight_style())
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(list, body, &mut self.review_state);
     }
 
     fn draw_dashboard(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1679,6 +2122,549 @@ impl App {
             .block(detail_block)
             .wrap(Wrap { trim: false });
         frame.render_widget(detail, area);
+    }
+
+    fn draw_review_detail(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let Some((ticket, review)) = self.selected_review_context_owned() else {
+            return;
+        };
+        let commits = review_commits(&review);
+        let changed_file_count = self.review_changed_file_count_cached(&commits);
+        let mut lines = vec![
+            Line::from(Span::styled(
+                review.title.clone(),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            field_line("Ticket", &format!("{} {}", ticket.short_id(), ticket.title)),
+            field_line("Branch", &review_branch_label(&review)),
+        ];
+        if !review.status.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{:<16}", "Status"),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                Span::styled(review.status.clone(), review_status_style(&review.status)),
+            ]));
+        }
+        if let Some(head) = review.head_sha.as_deref() {
+            lines.push(field_line("Current version", short_hash(head)));
+        }
+        let description = review_description(&ticket, &review);
+        if !description.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::raw(description));
+        }
+
+        lines.push(field_line(
+            "Files",
+            &format!("{changed_file_count} changed"),
+        ));
+
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "Commits",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        if commits.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No review revisions recorded yet. Run `ti review update`.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            let width = usize::from(area.width).saturating_sub(2);
+            let rows_available = usize::from(area.height)
+                .saturating_sub(lines.len() + 4)
+                .max(1);
+            lines.push(review_commit_summary_header(width));
+            for sha in &commits {
+                self.queue_review_commit_info_load(sha);
+            }
+            let versions = review_commit_versions_from_cache(
+                &commits,
+                &review.revision_changes,
+                &self.review_commit_cache,
+            );
+            let visible_commits = commits
+                .iter()
+                .take(rows_available)
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let loading = visible_commits
+                .iter()
+                .filter(|sha| !self.review_commit_cache.contains_key(**sha))
+                .count();
+            for (idx, sha) in visible_commits.iter().enumerate() {
+                lines.push(review_commit_summary_line(
+                    versions.get(idx).copied().unwrap_or(1),
+                    *sha,
+                    self.review_commit_cache.get(*sha),
+                    self.review_status_cache.get(*sha),
+                    width,
+                ));
+            }
+            let omitted = commits.len().saturating_sub(rows_available);
+            if omitted > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("... and {omitted} more commits"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            if loading > 0 {
+                lines.push(Line::from(Span::styled(
+                    format!("Loading commit metadata for {loading} visible commits..."),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+        }
+
+        let detail = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Review"))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(detail, area);
+    }
+
+    fn draw_review_commit_list_mode(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let Some((ticket, review)) = self.selected_review_context_owned() else {
+            return;
+        };
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .split(area);
+        self.draw_review_commit_table(frame, panes[0], &ticket, &review);
+        self.draw_review_commit_preview(frame, panes[1], &ticket, &review);
+    }
+
+    fn draw_review_commit_table(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        ticket: &Ticket,
+        review: &TicketReview,
+    ) {
+        let commits = review_commits(review);
+        self.sync_review_commit_selection_for(commits.len());
+        for sha in &commits {
+            self.queue_review_commit_info_load(sha);
+        }
+        let loaded_commit_data = commits
+            .iter()
+            .filter_map(|sha| {
+                let info = self.review_commit_cache.get(sha)?.clone();
+                let status = self.commit_review_status_cached(sha);
+                Some((sha.clone(), info, status))
+            })
+            .collect::<Vec<_>>();
+        let title = format!(
+            "{}  {}  ({})",
+            review.title,
+            ticket.short_id(),
+            review_branch_label(review)
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(tabs_title(self.active_tab, &title));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let rows_area = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(review_summary_height(inner.height)),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(inner);
+        frame.render_widget(
+            Paragraph::new(review_branch_summary_lines(
+                ticket,
+                review,
+                &loaded_commit_data,
+                usize::from(rows_area[0].width),
+            ))
+            .wrap(Wrap { trim: false }),
+            rows_area[0],
+        );
+        frame.render_widget(
+            Paragraph::new(review_commit_table_header(usize::from(rows_area[1].width))),
+            rows_area[1],
+        );
+
+        let versions = review_commit_versions_from_cache(
+            &commits,
+            &review.revision_changes,
+            &self.review_commit_cache,
+        );
+        let items = if commits.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "No review revisions recorded yet. Run `ti review update`.",
+                Style::default().fg(Color::DarkGray),
+            )))]
+        } else {
+            commits
+                .iter()
+                .enumerate()
+                .map(|(idx, sha)| {
+                    let status = self.commit_review_status_cached(sha);
+                    ListItem::new(review_commit_table_line(
+                        versions.get(idx).copied().unwrap_or(1),
+                        sha,
+                        review,
+                        self.review_commit_cache.get(sha),
+                        &status,
+                        usize::from(rows_area[2].width)
+                            .saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL)),
+                    ))
+                })
+                .collect()
+        };
+        let list = List::new(items)
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(0, 0, 95))
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(list, rows_area[2], &mut self.review_commit_state);
+    }
+
+    fn draw_review_commit_preview(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        _ticket: &Ticket,
+        review: &TicketReview,
+    ) {
+        let Some(sha) = self.selected_review_commit_sha(review) else {
+            let empty = Paragraph::new("No commit selected.")
+                .block(Block::default().borders(Borders::ALL).title("Preview"));
+            frame.render_widget(empty, area);
+            return;
+        };
+        self.queue_review_commit_info_load(&sha);
+        let status = self.commit_review_status_cached(&sha);
+        let info = self.review_commit_cache.get(&sha);
+        let subject = info
+            .map(|info| info.subject.as_str())
+            .filter(|subject| !subject.is_empty())
+            .unwrap_or("metadata not loaded");
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    short_hash(&sha).to_string(),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    subject.to_string(),
+                    if info.is_some() {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]),
+            review_commit_status_line(&status),
+        ];
+        if let Some(info) = info {
+            lines.push(field_line("Author", &info.author));
+            lines.push(field_line("Updated", &info.updated));
+            if !info.shortstat.is_empty() {
+                lines.push(field_line("Changes", &info.shortstat));
+            }
+            if !info.body.is_empty() {
+                lines.push(Line::raw(""));
+                for line in info.body.lines().take(12) {
+                    lines.push(Line::raw(line.to_string()));
+                }
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "Loading commit metadata...",
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        let messages = review_messages_for_commit(review, &sha);
+        if !messages.is_empty() {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "Review messages",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for message in messages.iter().take(5) {
+                lines.push(review_message_line(
+                    message,
+                    usize::from(area.width).saturating_sub(2),
+                ));
+            }
+        }
+        let preview = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Preview"))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(preview, area);
+    }
+
+    fn draw_review_commit_mode(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let Some((ticket, review)) = self.selected_review_context_owned() else {
+            return;
+        };
+        let Some(sha) = self.selected_review_commit_sha(&review) else {
+            return;
+        };
+        self.sync_review_commit_pane_focus();
+        let (commit_position, commit_total) = self
+            .selected_review_commit_position(&review)
+            .unwrap_or((1, 1));
+        let vertical = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(area);
+        let top = Paragraph::new(review_commit_meta_line(
+            &ticket,
+            &review,
+            &sha,
+            commit_position,
+            commit_total,
+        ))
+        .block(Block::default().borders(Borders::ALL).title("Review"));
+        frame.render_widget(top, vertical[0]);
+
+        let panes = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .split(vertical[1]);
+        if self.review_diff_toc_open {
+            let diff_panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+                .split(panes[0]);
+            self.draw_review_diff_toc(
+                frame,
+                diff_panes[0],
+                &sha,
+                self.review_commit_pane_focus == ReviewCommitPaneFocus::Toc,
+            );
+            self.draw_review_commit_diff(
+                frame,
+                diff_panes[1],
+                &sha,
+                self.review_commit_pane_focus == ReviewCommitPaneFocus::Diff,
+            );
+        } else {
+            self.draw_review_commit_diff(
+                frame,
+                panes[0],
+                &sha,
+                self.review_commit_pane_focus == ReviewCommitPaneFocus::Diff,
+            );
+        }
+        self.draw_review_commit_discussion(
+            frame,
+            panes[1],
+            &review,
+            &sha,
+            self.review_commit_pane_focus == ReviewCommitPaneFocus::Comments,
+        );
+    }
+
+    fn draw_review_diff_toc(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        sha: &str,
+        focused: bool,
+    ) {
+        let entries = self.review_diff_render_cached(sha).toc_entries;
+        self.sync_review_diff_toc_selection_for(entries.len());
+        let width = usize::from(area.width).saturating_sub(2);
+        let items = if entries.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "No files or hunks.",
+                Style::default().fg(Color::DarkGray),
+            )))]
+        } else {
+            entries
+                .iter()
+                .map(|entry| {
+                    let prefix = if entry.depth == 0 { "" } else { "  " };
+                    let color = if entry.depth == 0 {
+                        Color::LightBlue
+                    } else {
+                        Color::DarkGray
+                    };
+                    ListItem::new(Line::from(Span::styled(
+                        truncate_display(&format!("{prefix}{}", entry.label), width),
+                        Style::default().fg(color),
+                    )))
+                })
+                .collect()
+        };
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(review_pane_title("Contents", focused)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(0, 0, 95))
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
+            .highlight_spacing(HighlightSpacing::Always);
+        frame.render_stateful_widget(list, area, &mut self.review_diff_toc_state);
+    }
+
+    fn draw_review_commit_diff(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        sha: &str,
+        focused: bool,
+    ) {
+        self.review_diff_page_height = area.height.saturating_sub(2).max(1);
+        let render = self.review_diff_render_cached(sha);
+        let files = render.files;
+        let folding_active = self
+            .review_collapsed_diff_files
+            .get(sha)
+            .is_some_and(|files| !files.is_empty());
+        if folding_active {
+            self.sync_review_diff_file_selection_for(files.len());
+        }
+        let selected_file = if folding_active {
+            self.review_diff_file_state
+                .selected()
+                .and_then(|idx| files.get(idx))
+                .map(String::as_str)
+        } else {
+            None
+        };
+        let mut selected_line =
+            (!folding_active).then_some(usize::from(self.review_diff_line_focus));
+        let spans = render.spans;
+        if let Some(line) = selected_line {
+            let max_line = render.line_count.saturating_sub(1);
+            if line > max_line {
+                self.review_diff_line_focus = max_line.min(usize::from(u16::MAX)) as u16;
+                selected_line = Some(max_line);
+            }
+        }
+        let max_scroll = render
+            .line_count
+            .saturating_sub(usize::from(self.review_diff_page_height));
+        let max_scroll = max_scroll.min(usize::from(u16::MAX)) as u16;
+        self.review_diff_scroll = self.review_diff_scroll.min(max_scroll);
+        if let Some(selected_file) = selected_file {
+            if let Some(span) = spans.iter().find(|span| span.key == selected_file) {
+                self.review_diff_scroll = span.start.min(usize::from(u16::MAX)) as u16;
+            }
+        } else if let Some(line) = selected_line {
+            let visible_start = usize::from(self.review_diff_scroll);
+            let visible_end = visible_start + usize::from(self.review_diff_page_height);
+            if line < visible_start {
+                self.review_diff_scroll = line.min(usize::from(u16::MAX)) as u16;
+            } else if line >= visible_end {
+                let scroll = line
+                    .saturating_sub(usize::from(self.review_diff_page_height))
+                    .saturating_add(1);
+                self.review_diff_scroll = scroll.min(usize::from(u16::MAX)) as u16;
+            }
+        }
+        self.review_diff_scroll = self.review_diff_scroll.min(max_scroll);
+        let selected_gutter_line = selected_file
+            .and_then(|file| {
+                spans
+                    .iter()
+                    .find(|span| span.key == file)
+                    .map(|span| span.start)
+            })
+            .or(selected_line);
+        let info = self.review_commit_info_cached(sha);
+        let patch_lines = self.commit_patch_lines_cached(sha);
+        let collapsed = self
+            .review_collapsed_diff_files
+            .get(sha)
+            .cloned()
+            .unwrap_or_default();
+        let visible_lines = review_commit_diff_visible_lines(
+            &info,
+            &patch_lines,
+            &collapsed,
+            usize::from(self.review_diff_scroll),
+            usize::from(self.review_diff_page_height),
+        );
+        let lines = add_diff_gutter(
+            visible_lines,
+            render.line_count,
+            usize::from(self.review_diff_scroll),
+            usize::from(self.review_diff_page_height),
+            selected_gutter_line,
+        );
+        let diff = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(review_pane_title("Commit", focused)),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(diff, area);
+    }
+
+    fn draw_review_commit_discussion(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        review: &TicketReview,
+        sha: &str,
+        focused: bool,
+    ) {
+        self.review_discussion_page_height = area.height.saturating_sub(2).max(1);
+        let messages = review_messages_for_commit(review, sha);
+        let mut lines = Vec::new();
+        if messages.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No review comments on this commit.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            for message in messages {
+                lines.push(review_message_header_line(message));
+                for line in message.body.lines() {
+                    lines.push(Line::raw(line.to_string()));
+                }
+                lines.push(Line::raw(""));
+            }
+        }
+        let max_scroll = lines
+            .len()
+            .saturating_sub(usize::from(self.review_discussion_page_height));
+        self.review_discussion_scroll = self
+            .review_discussion_scroll
+            .min(max_scroll.min(usize::from(u16::MAX)) as u16);
+        let discussion = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(review_pane_title("Discussion", focused)),
+            )
+            .wrap(Wrap { trim: false })
+            .scroll((self.review_discussion_scroll, 0));
+        frame.render_widget(discussion, area);
     }
 
     fn draw_writeup_detail(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1987,6 +2973,62 @@ impl App {
 
         frame.render_widget(Clear, area);
         frame.render_stateful_widget(list, area, &mut self.link_issue_state);
+    }
+
+    fn draw_review_branch_picker_modal(&mut self, frame: &mut Frame<'_>) {
+        let area = centered_rect(78, 22, frame.area());
+        let selected = self
+            .review_branch_state
+            .selected()
+            .unwrap_or(0)
+            .min(self.review_branch_choices.len().saturating_sub(1));
+        if self.review_branch_choices.is_empty() {
+            self.review_branch_state.select(None);
+        } else {
+            self.review_branch_state.select(Some(selected));
+        }
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(area);
+        let row_width = usize::from(chunks[0].width)
+            .saturating_sub(2)
+            .saturating_sub(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL));
+        let items: Vec<ListItem<'_>> = if self.review_branch_choices.is_empty() {
+            vec![ListItem::new(Line::from(Span::styled(
+                "No branches without open reviews.",
+                Style::default().fg(Color::DarkGray),
+            )))]
+        } else {
+            self.review_branch_choices
+                .iter()
+                .map(|choice| ListItem::new(review_branch_choice_line(choice, row_width)))
+                .collect()
+        };
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL).title("Pick branch"))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::Rgb(0, 0, 95))
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(HIGHLIGHT_SYMBOL)
+            .highlight_spacing(HighlightSpacing::Always);
+        let help = Paragraph::new(Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" create  "),
+            Span::styled("j/k", Style::default().fg(Color::Yellow)),
+            Span::raw(" move  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" cancel"),
+        ]))
+        .style(Style::default().bg(Color::DarkGray));
+
+        frame.render_widget(Clear, area);
+        frame.render_stateful_widget(list, chunks[0], &mut self.review_branch_state);
+        frame.render_widget(help, chunks[1]);
     }
 
     fn draw_versions_modal(&mut self, frame: &mut Frame<'_>) {
@@ -2420,6 +3462,58 @@ impl App {
         frame.render_widget(modal, area);
     }
 
+    fn draw_close_review_confirm_modal(&self, frame: &mut Frame<'_>) {
+        let area = centered_rect(64, 7, frame.area());
+        let branch = self
+            .pending_close_review
+            .as_ref()
+            .map(|(_, branch_id)| branch_id.as_str())
+            .unwrap_or("<unknown review>");
+        let branch = truncate_display(branch, usize::from(area.width).saturating_sub(24));
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("Close review `{branch}`?"),
+                Style::default().fg(Color::LightRed),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "y close   n/Esc cancel",
+                Style::default().fg(Color::Yellow),
+            )),
+        ];
+        let modal = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Close Review"))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, area);
+        frame.render_widget(modal, area);
+    }
+
+    fn draw_approve_review_confirm_modal(&self, frame: &mut Frame<'_>) {
+        let area = centered_rect(62, 8, frame.area());
+        let lines = vec![
+            Line::from(Span::styled(
+                "Approve selected commit?",
+                Style::default().fg(Color::LightGreen),
+            )),
+            Line::raw(""),
+            Line::raw("Approve immediately, or open the editor to add a comment."),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "a approve   c comment   Esc cancel",
+                Style::default().fg(Color::Yellow),
+            )),
+        ];
+        let modal = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Approve Commit"),
+            )
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, area);
+        frame.render_widget(modal, area);
+    }
+
     fn draw_save_view_modal(&self, frame: &mut Frame<'_>) {
         let area = centered_rect(64, 9, frame.area());
         let filter = self.active_filter_display();
@@ -2664,6 +3758,15 @@ impl App {
                 help_section(&mut lines, "Delete View");
                 lines.push(help_columns(("y", "delete"), Some(("n/Esc", "cancel"))));
             }
+            Mode::ConfirmCloseReview => {
+                help_section(&mut lines, "Close Review");
+                lines.push(help_columns(("y", "close"), Some(("n/Esc", "cancel"))));
+            }
+            Mode::ConfirmApproveReview => {
+                help_section(&mut lines, "Approve Commit");
+                lines.push(help_columns(("a", "approve"), Some(("c", "comment"))));
+                lines.push(help_columns(("Esc", "cancel"), None));
+            }
             Mode::SaveView => {
                 help_section(&mut lines, "Save View");
                 lines.push(help_columns(
@@ -2689,6 +3792,14 @@ impl App {
                 lines.push(help_columns(
                     ("j/k", "move issue"),
                     Some(("Enter", "unlink selected")),
+                ));
+                lines.push(help_columns(("Esc", "cancel"), None));
+            }
+            Mode::ReviewBranchPicker => {
+                help_section(&mut lines, "New Review");
+                lines.push(help_columns(
+                    ("j/k", "move branch"),
+                    Some(("Enter", "create review")),
                 ));
                 lines.push(help_columns(("Esc", "cancel"), None));
             }
@@ -2794,6 +3905,67 @@ impl App {
                 help_section(&mut lines, "Views");
                 lines.push(help_columns(("d", "stats view"), None));
             }
+            Mode::Normal if self.active_tab == TuiTab::Reviews => {
+                help_section(&mut lines, "Reviews");
+                if self.review_mode == ReviewMode::Commit {
+                    lines.push(help_columns(
+                        ("h/l", "focus pane"),
+                        Some(("j/k", "scroll pane")),
+                    ));
+                    lines.push(help_columns(
+                        ("o/p", "previous/next commit"),
+                        Some(("Space", "page down")),
+                    ));
+                    lines.push(help_columns(
+                        ("Ctrl-D", "page down"),
+                        Some(("Ctrl-U", "page up")),
+                    ));
+                    lines.push(help_columns(("Ctrl-1..4", "jump commit"), None));
+                    lines.push(help_columns(
+                        ("f", "fold current file"),
+                        Some(("F", "fold all files")),
+                    ));
+                    lines.push(help_columns(("t", "contents"), Some(("Enter", "jump"))));
+                    lines.push(help_columns(
+                        ("c", "comment"),
+                        Some(("R", "request changes")),
+                    ));
+                    lines.push(help_columns(
+                        ("a", "approve commit"),
+                        Some(("r", "refresh")),
+                    ));
+                    lines.push(help_columns(("Esc", "commit list"), None));
+                } else {
+                    lines.push(help_columns(
+                        ("Tab", "issues tab"),
+                        Some(("j/k", "move reviews")),
+                    ));
+                    lines.push(help_columns(
+                        ("Enter", "details/commit"),
+                        Some(("Esc", "back/close")),
+                    ));
+                    lines.push(help_columns(
+                        ("a", "show all/open"),
+                        Some(("e", "edit title/body")),
+                    ));
+                    lines.push(help_columns(("c", "close"), Some(("o", "reopen"))));
+                    lines.push(help_columns(("u", "update head"), None));
+                    if self.review_mode == ReviewMode::Commits {
+                        lines.push(help_columns(
+                            ("c", "comment"),
+                            Some(("R/a", "changes/approve")),
+                        ));
+                    }
+                }
+                lines.push(help_columns(
+                    ("/", "search text"),
+                    Some(("g", "tag picker")),
+                ));
+                lines.push(help_columns(
+                    ("+/-", "resize detail"),
+                    Some(("r", "refresh")),
+                ));
+            }
             Mode::Normal if self.active_tab == TuiTab::Dashboard => {
                 help_section(&mut lines, "Dashboard");
                 lines.push(help_columns(("Tab", "issues tab"), Some(("r", "refresh"))));
@@ -2865,6 +4037,9 @@ impl App {
                 help_section(&mut lines, "Views");
                 lines.push(help_columns(("b", "board view"), Some(("d", "stats view"))));
                 lines.push(help_columns(("U", "subissues"), None));
+
+                help_section(&mut lines, "Reviews");
+                lines.push(help_columns(("n", "new branch review"), None));
             }
         }
 
@@ -2936,6 +4111,14 @@ impl App {
                 self.handle_delete_view_confirm_key(key)?;
                 false
             }
+            Mode::ConfirmCloseReview => {
+                self.handle_close_review_confirm_key(key)?;
+                false
+            }
+            Mode::ConfirmApproveReview => {
+                self.handle_approve_review_confirm_key(key, terminal)?;
+                false
+            }
             Mode::SaveView => {
                 self.handle_save_view_key(key)?;
                 false
@@ -2946,6 +4129,10 @@ impl App {
             }
             Mode::UnlinkIssueSelect => {
                 self.handle_unlink_issue_select_key(key)?;
+                false
+            }
+            Mode::ReviewBranchPicker => {
+                self.handle_review_branch_picker_key(key)?;
                 false
             }
             Mode::Versions => {
@@ -2985,6 +4172,22 @@ impl App {
                 if self.comments_mode {
                     self.comments_mode = false;
                     false
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commit
+                    && self.review_diff_toc_open
+                {
+                    self.review_diff_toc_open = false;
+                    false
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commit
+                {
+                    self.review_mode = ReviewMode::Commits;
+                    false
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commits
+                {
+                    self.review_mode = ReviewMode::Summary;
+                    false
                 } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail_focus == WriteupPaneFocus::Toc
                 {
@@ -2996,6 +4199,11 @@ impl App {
                     self.writeup_detail_focus = WriteupPaneFocus::List;
                     self.writeup_detail_scroll = 0;
                     self.writeup_toc_open = false;
+                    false
+                } else if self.active_tab == TuiTab::Reviews && self.review_detail.is_some() {
+                    self.review_detail = None;
+                    self.review_mode = ReviewMode::Summary;
+                    self.review_commit_state.select(None);
                     false
                 } else if self.detail.is_some() {
                     self.detail = None;
@@ -3017,19 +4225,35 @@ impl App {
                 false
             }
             KeyCode::Char('g') => {
-                if self.active_tab == TuiTab::Issues {
+                if matches!(self.active_tab, TuiTab::Issues | TuiTab::Reviews) {
                     self.begin_tag_filter();
                 }
                 false
             }
             KeyCode::Char('t') => {
-                if self.active_tab == TuiTab::Writeups
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.toggle_review_diff_toc();
+                } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail.is_some()
                     && self.writeup_detail_focus != WriteupPaneFocus::List
                 {
                     self.toggle_writeup_toc();
+                } else if self.active_tab == TuiTab::Reviews {
+                    self.status = Some("Review tags are managed from the issue tab.".to_string());
                 } else {
                     self.begin_manage_tags();
+                }
+                false
+            }
+            KeyCode::Char('f') => {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.toggle_current_review_file_diff();
+                }
+                false
+            }
+            KeyCode::Char('F') => {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.toggle_all_review_file_diffs();
                 }
                 false
             }
@@ -3059,12 +4283,26 @@ impl App {
                 }
                 false
             }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.scroll_review_commit_pane_page(1);
+                }
+                false
+            }
             KeyCode::Char('d') => {
                 self.handle_dashboard_key();
                 false
             }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.scroll_review_commit_pane_page(-1);
+                }
+                false
+            }
             KeyCode::Char('u') => {
-                if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Summary {
+                    self.update_selected_review_from_branch()?;
+                } else if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
                     self.begin_unlink_issue_select();
                 }
                 false
@@ -3072,6 +4310,21 @@ impl App {
             KeyCode::Char('U') => {
                 if self.active_tab == TuiTab::Issues {
                     self.toggle_subissue_visibility()?;
+                }
+                false
+            }
+            KeyCode::Char('1') | KeyCode::Char('2') | KeyCode::Char('3') | KeyCode::Char('4')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    let index = match key.code {
+                        KeyCode::Char('1') => 0,
+                        KeyCode::Char('2') => 1,
+                        KeyCode::Char('3') => 2,
+                        KeyCode::Char('4') => 3,
+                        _ => 0,
+                    };
+                    self.select_review_commit(index);
                 }
                 false
             }
@@ -3086,14 +4339,24 @@ impl App {
                     } else {
                         self.begin_create();
                     }
-                } else {
+                } else if self.active_tab == TuiTab::Writeups {
                     self.create_writeup_in_editor(terminal)?;
+                } else if self.active_tab == TuiTab::Reviews {
+                    self.begin_review_branch_picker()?;
                 }
                 false
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.comments_mode {
                     self.next_comment();
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commit
+                {
+                    self.scroll_review_commit_pane(1);
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commits
+                {
+                    self.next_review_commit();
                 } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail_focus == WriteupPaneFocus::Detail
                 {
@@ -3115,6 +4378,14 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.comments_mode {
                     self.previous_comment();
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commit
+                {
+                    self.scroll_review_commit_pane(-1);
+                } else if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commits
+                {
+                    self.previous_review_commit();
                 } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail_focus == WriteupPaneFocus::Detail
                 {
@@ -3134,7 +4405,9 @@ impl App {
                 false
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.focus_next_review_commit_pane();
+                } else if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
                     self.focus_next_writeup_pane();
                 } else if self.active_tab == TuiTab::Issues
                     && self.view == ViewMode::Board
@@ -3145,7 +4418,9 @@ impl App {
                 false
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.focus_previous_review_commit_pane();
+                } else if self.active_tab == TuiTab::Writeups && self.writeup_detail.is_some() {
                     self.focus_previous_writeup_pane();
                 } else if self.active_tab == TuiTab::Issues
                     && self.view == ViewMode::Board
@@ -3155,8 +4430,24 @@ impl App {
                 }
                 false
             }
+            KeyCode::Char(' ') => {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.scroll_review_commit_pane_page(1);
+                }
+                false
+            }
             KeyCode::Enter => {
-                if self.active_tab == TuiTab::Writeups
+                if self.active_tab == TuiTab::Reviews
+                    && self.review_mode == ReviewMode::Commit
+                    && self.review_diff_toc_open
+                    && self.review_commit_pane_focus == ReviewCommitPaneFocus::Toc
+                {
+                    self.jump_to_selected_review_diff_toc_entry();
+                } else if self.active_tab == TuiTab::Reviews && self.review_detail.is_some() {
+                    if matches!(self.review_mode, ReviewMode::Summary | ReviewMode::Commits) {
+                        self.toggle_review_mode();
+                    }
+                } else if self.active_tab == TuiTab::Writeups
                     && self.writeup_detail_focus == WriteupPaneFocus::Toc
                 {
                     self.jump_to_selected_writeup_heading();
@@ -3168,6 +4459,8 @@ impl App {
             KeyCode::Char('e') => {
                 if self.active_tab == TuiTab::Writeups {
                     self.edit_writeup_in_editor(terminal)?;
+                } else if self.active_tab == TuiTab::Reviews {
+                    self.edit_review_in_editor(terminal)?;
                 } else {
                     self.edit_ticket_in_editor(terminal)?;
                 }
@@ -3182,10 +4475,24 @@ impl App {
                 false
             }
             KeyCode::Char('c') => {
-                if self.active_tab == TuiTab::Issues {
+                if self.active_tab == TuiTab::Reviews
+                    && matches!(self.review_mode, ReviewMode::Commits | ReviewMode::Commit)
+                {
+                    self.add_review_comment_in_editor(terminal)?;
+                } else if self.active_tab == TuiTab::Issues {
                     self.add_comment_in_editor(terminal)?;
+                } else if self.active_tab == TuiTab::Reviews {
+                    self.begin_close_review_confirm();
                 } else {
                     self.set_selected_writeup_status(WriteupStatus::Closed)?;
+                }
+                false
+            }
+            KeyCode::Char('R') => {
+                if self.active_tab == TuiTab::Reviews
+                    && matches!(self.review_mode, ReviewMode::Commits | ReviewMode::Commit)
+                {
+                    self.request_review_changes_in_editor(terminal)?;
                 }
                 false
             }
@@ -3202,7 +4509,9 @@ impl App {
                 false
             }
             KeyCode::Char('p') => {
-                if self.active_tab == TuiTab::Writeups {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.next_review_commit();
+                } else if self.active_tab == TuiTab::Writeups {
                     self.begin_input(InputKind::Priority);
                 } else {
                     self.begin_input(InputKind::Priority);
@@ -3218,15 +4527,25 @@ impl App {
                 false
             }
             KeyCode::Char('o') => {
-                if self.active_tab == TuiTab::Issues {
+                if self.active_tab == TuiTab::Reviews && self.review_mode == ReviewMode::Commit {
+                    self.previous_review_commit();
+                } else if self.active_tab == TuiTab::Issues {
                     self.begin_order();
+                } else if self.active_tab == TuiTab::Reviews {
+                    self.reopen_selected_review()?;
                 } else {
                     self.set_selected_writeup_status(WriteupStatus::Open)?;
                 }
                 false
             }
             KeyCode::Char('a') => {
-                if self.active_tab == TuiTab::Writeups {
+                if self.active_tab == TuiTab::Reviews
+                    && matches!(self.review_mode, ReviewMode::Commits | ReviewMode::Commit)
+                {
+                    self.begin_approve_review_confirm();
+                } else if self.active_tab == TuiTab::Reviews {
+                    self.toggle_review_scope();
+                } else if self.active_tab == TuiTab::Writeups {
                     self.toggle_writeup_scope();
                 }
                 false
@@ -3381,6 +4700,41 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.pending_delete_view = None;
                 self.mode = Mode::SavedViews;
+                self.status = Some("Cancelled.".to_string());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_close_review_confirm_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.close_pending_review()?,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.pending_close_review = None;
+                self.mode = Mode::Normal;
+                self.status = Some("Cancelled.".to_string());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_approve_review_confirm_key(
+        &mut self,
+        key: KeyEvent,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        match key.code {
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.approve_selected_review_commit_quick()?
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.mode = Mode::Normal;
+                self.approve_selected_review_commit_in_editor(terminal)?;
+            }
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
                 self.status = Some("Cancelled.".to_string());
             }
             _ => {}
@@ -3561,6 +4915,28 @@ impl App {
         Ok(())
     }
 
+    fn handle_review_branch_picker_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.review_branch_choices.clear();
+                self.review_branch_state.select(None);
+                self.status = Some("Cancelled.".to_string());
+            }
+            KeyCode::Down | KeyCode::Char('j') => self.next_review_branch_choice(),
+            KeyCode::Up | KeyCode::Char('k') => self.previous_review_branch_choice(),
+            KeyCode::Enter => {
+                if self.create_review_from_selected_branch()? {
+                    self.mode = Mode::Normal;
+                    self.review_branch_choices.clear();
+                    self.review_branch_state.select(None);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn begin_create(&mut self) {
         self.new_ticket = NewTicketDraft::default();
         self.mode = Mode::Create;
@@ -3572,6 +4948,18 @@ impl App {
             ..Default::default()
         };
         self.mode = Mode::Create;
+    }
+
+    fn begin_review_branch_picker(&mut self) -> Result<()> {
+        self.review_branch_choices = load_review_branch_choices(&self.open_review_branch_names())?;
+        if self.review_branch_choices.is_empty() {
+            self.review_branch_state.select(None);
+            self.status = Some("No branches without open reviews.".to_string());
+            return Ok(());
+        }
+        self.review_branch_state.select(Some(0));
+        self.mode = Mode::ReviewBranchPicker;
+        Ok(())
     }
 
     fn begin_tag_filter(&mut self) {
@@ -3815,6 +5203,7 @@ impl App {
         self.issue_columns = saved_issue_columns(view);
         self.detail = None;
         self.writeup_detail = None;
+        self.review_detail = None;
         self.comments_mode = false;
         self.active_tab = TuiTab::Issues;
         self.view = ViewMode::List;
@@ -3838,6 +5227,7 @@ impl App {
         self.tag_filter_match_all = true;
         self.detail = None;
         self.writeup_detail = None;
+        self.review_detail = None;
         self.comments_mode = false;
         self.reload(None)?;
         self.status = Some("Cleared to default view.".to_string());
@@ -3936,8 +5326,8 @@ impl App {
         let initial = writeup_edit_body(writeup);
 
         suspend_terminal(terminal)?;
-        let edited = editor::capture_with_initial(
-            "Edit the title on the first line. Remaining non-comment lines become the writeup body.",
+        let edited = editor::capture_markdown_with_initial(
+            "Edit the title on the first line. Remaining lines become the writeup body.",
             &initial,
         );
         resume_terminal(terminal)?;
@@ -3960,13 +5350,52 @@ impl App {
         Ok(())
     }
 
+    fn edit_review_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let Some((ticket_id, review)) = self.selected_review_context_for_edit() else {
+            self.status = Some("Select a review first.".to_string());
+            return Ok(());
+        };
+        let initial = review_edit_body(&review);
+
+        suspend_terminal(terminal)?;
+        let edited = editor::capture_markdown_with_initial(
+            "Edit the review title on the first line. Remaining lines become the branch description.",
+            &initial,
+        );
+        resume_terminal(terminal)?;
+
+        match edited? {
+            Some(edited) => {
+                let (title, description) = editor::parse_ticket_edit(&edited)?;
+                let target = self
+                    .store
+                    .session()
+                    .target(&Target::branch(&review.branch_id));
+                target.set("title", title.as_str())?;
+                target.set("description", description.as_deref().unwrap_or(""))?;
+                self.status = Some("Updated review branch.".to_string());
+                self.clear_review_caches();
+                self.reload_all(Some(ticket_id), None)?;
+                self.select_review_ticket_by_id(ticket_id);
+            }
+            _ => {
+                self.status = Some("Cancelled.".to_string());
+            }
+        }
+
+        Ok(())
+    }
+
     fn create_writeup_in_editor(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
         suspend_terminal(terminal)?;
-        let edited = editor::capture(
-            "Write the title on the first line. Remaining non-comment lines become the writeup body.",
+        let edited = editor::capture_markdown(
+            "Write the title on the first line. Remaining lines become the writeup body.",
         );
         resume_terminal(terminal)?;
 
@@ -4024,6 +5453,219 @@ impl App {
         Ok(())
     }
 
+    fn add_review_comment_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        self.capture_review_message_in_editor(terminal, "comment")
+    }
+
+    fn request_review_changes_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        self.capture_review_message_in_editor(terminal, "changes-requested")
+    }
+
+    fn capture_review_message_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+        message_type: &str,
+    ) -> Result<()> {
+        let Some((ticket, review, sha, location)) = self.selected_review_action_target() else {
+            self.status = Some("Open a review commit first.".to_string());
+            return Ok(());
+        };
+        let prompt = review_message_prompt(message_type, &ticket, &review, &sha, location.as_ref());
+        suspend_terminal(terminal)?;
+        let body = if let Some(initial) = default_review_message_body(message_type) {
+            editor::capture_with_initial(&prompt, initial)
+        } else {
+            editor::capture(&prompt)
+        };
+        resume_terminal(terminal)?;
+
+        let Some(body) = body? else {
+            self.status = Some("Cancelled.".to_string());
+            return Ok(());
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            self.status = Some("Cancelled.".to_string());
+            return Ok(());
+        }
+
+        let branch_id = review.branch_id.clone();
+        if message_type == "changes-requested" {
+            self.store
+                .session()
+                .target(&Target::branch(&branch_id))
+                .set("status", "changes-requested")?;
+        }
+        self.append_review_message(
+            &branch_id,
+            ReviewMessageView {
+                author: self.store.email().to_string(),
+                body: body.to_string(),
+                message_type: message_type.to_string(),
+                commit: Some(sha),
+                path: location.as_ref().map(|location| location.path.clone()),
+                lines: location.map(|location| location.line.to_string()),
+            },
+        )?;
+        self.reload_after_review_action(ticket.id)?;
+        self.status = Some(if message_type == "changes-requested" {
+            "Requested changes.".to_string()
+        } else {
+            "Added review comment.".to_string()
+        });
+        Ok(())
+    }
+
+    fn approve_selected_review_commit_in_editor(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
+        let Some((ticket, review, sha, _)) = self.selected_review_action_target() else {
+            self.status = Some("Open a review commit first.".to_string());
+            return Ok(());
+        };
+        let prompt = review_message_prompt("approval", &ticket, &review, &sha, None);
+        suspend_terminal(terminal)?;
+        let body = editor::capture_with_initial(
+            &prompt,
+            default_review_message_body("approval").unwrap_or("Approved"),
+        );
+        resume_terminal(terminal)?;
+
+        let Some(body) = body? else {
+            self.status = Some("Cancelled.".to_string());
+            return Ok(());
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            self.status = Some("Cancelled.".to_string());
+            return Ok(());
+        }
+
+        self.approve_review_commit(ticket, review, sha, body)
+    }
+
+    fn begin_approve_review_confirm(&mut self) {
+        let Some((_, review)) = self.selected_review_context_owned() else {
+            self.status = Some("Open a review commit first.".to_string());
+            return;
+        };
+        if self.selected_review_commit_sha(&review).is_none() {
+            self.status = Some("Open a review commit first.".to_string());
+            return;
+        };
+        self.mode = Mode::ConfirmApproveReview;
+    }
+
+    fn approve_selected_review_commit_quick(&mut self) -> Result<()> {
+        let Some((ticket, review)) = self.selected_review_context_owned() else {
+            self.mode = Mode::Normal;
+            self.status = Some("Open a review commit first.".to_string());
+            return Ok(());
+        };
+        let Some(sha) = self.selected_review_commit_sha(&review) else {
+            self.mode = Mode::Normal;
+            self.status = Some("Open a review commit first.".to_string());
+            return Ok(());
+        };
+        self.approve_review_commit(ticket, review, sha, "Approved")
+    }
+
+    fn approve_review_commit(
+        &mut self,
+        ticket: Ticket,
+        review: TicketReview,
+        sha: String,
+        body: &str,
+    ) -> Result<()> {
+        let email = self.store.email().to_string();
+        let commit_target = self.store.session().target(&Target::commit(&sha)?);
+        commit_target.set_add("review:approvals", &email)?;
+        commit_target.set_add("review:reviewed", &email)?;
+        self.append_review_message(
+            &review.branch_id,
+            ReviewMessageView {
+                author: email,
+                body: body.to_string(),
+                message_type: "approval".to_string(),
+                commit: Some(sha.clone()),
+                path: None,
+                lines: None,
+            },
+        )?;
+        if self.review_commits_all_approved(&review, &sha) {
+            self.store
+                .session()
+                .target(&Target::branch(&review.branch_id))
+                .set("status", "approved")?;
+        }
+        self.mode = Mode::Normal;
+        self.reload_after_review_action(ticket.id)?;
+        self.status = Some(format!("Approved commit {}.", short_hash(&sha)));
+        Ok(())
+    }
+
+    fn review_commits_all_approved(&self, review: &TicketReview, approved_sha: &str) -> bool {
+        let commits = review_commits(review);
+        !commits.is_empty()
+            && commits.iter().all(|sha| {
+                sha == approved_sha || !commit_review_status(&self.store, sha).approvals.is_empty()
+            })
+    }
+
+    fn selected_review_action_target(
+        &mut self,
+    ) -> Option<(Ticket, TicketReview, String, Option<DiffLineLocation>)> {
+        let (ticket, review) = self.selected_review_context_owned()?;
+        let sha = self.selected_review_commit_sha(&review)?;
+        let location = if self.review_mode == ReviewMode::Commit
+            && !self.current_review_diff_has_folded_files()
+        {
+            let info = self.review_commit_info_cached(&sha);
+            let patch_lines = self.commit_patch_lines_cached(&sha);
+            let collapsed = self
+                .review_collapsed_diff_files
+                .get(&sha)
+                .cloned()
+                .unwrap_or_default();
+            review_diff_location_at_line(
+                &info,
+                &patch_lines,
+                &collapsed,
+                usize::from(self.review_diff_line_focus),
+            )
+        } else {
+            None
+        };
+        Some((ticket, review, sha, location))
+    }
+
+    fn append_review_message(&self, branch_id: &str, message: ReviewMessageView) -> Result<()> {
+        let json = serde_json::to_string(&message)?;
+        self.store
+            .session()
+            .target(&Target::branch(branch_id))
+            .list_push("review:messages", &json)?;
+        Ok(())
+    }
+
+    fn reload_after_review_action(&mut self, ticket_id: uuid::Uuid) -> Result<()> {
+        self.clear_review_caches();
+        self.reload_all(None, None)?;
+        self.select_review_ticket_by_id(ticket_id);
+        self.review_detail = self
+            .all_tickets
+            .iter()
+            .position(|ticket| ticket.id == ticket_id);
+        Ok(())
+    }
+
     fn promote_selected_writeup(&mut self) -> Result<()> {
         let Some(writeup) = self.selected_writeup() else {
             self.status = Some("Select a writeup first.".to_string());
@@ -4075,6 +5717,124 @@ impl App {
         });
     }
 
+    fn toggle_review_scope(&mut self) {
+        let selected_id = self.selected_review_ticket().map(|ticket| ticket.id);
+        self.show_all_reviews = !self.show_all_reviews;
+        self.sync_review_selection();
+        if let Some(id) = selected_id {
+            self.select_review_ticket_by_id(id);
+        }
+        self.status = Some(if self.show_all_reviews {
+            "Showing all reviews.".to_string()
+        } else {
+            "Showing open reviews.".to_string()
+        });
+    }
+
+    fn begin_close_review_confirm(&mut self) {
+        let Some((ticket_id, review)) = self.selected_review_context_for_edit() else {
+            self.status = Some("Select a review first.".to_string());
+            return;
+        };
+        self.pending_close_review = Some((ticket_id, review.branch_id));
+        self.mode = Mode::ConfirmCloseReview;
+    }
+
+    fn close_pending_review(&mut self) -> Result<()> {
+        let Some((ticket_id, branch_id)) = self.pending_close_review.take() else {
+            self.mode = Mode::Normal;
+            self.status = Some("Select a review first.".to_string());
+            return Ok(());
+        };
+        self.store
+            .session()
+            .target(&Target::branch(&branch_id))
+            .set("status", "closed")?;
+        self.store
+            .set_lifecycle(&ticket_id, TicketStatus::Closed, TicketState::Resolved)?;
+        self.mode = Mode::Normal;
+        self.clear_review_caches();
+        self.reload_all(Some(ticket_id), None)?;
+        self.select_review_ticket_by_id(ticket_id);
+        self.status = Some(format!("Closed review {}.", branch_id));
+        Ok(())
+    }
+
+    fn reopen_selected_review(&mut self) -> Result<()> {
+        let Some((ticket_id, review)) = self.selected_review_context_for_edit() else {
+            self.status = Some("Select a review first.".to_string());
+            return Ok(());
+        };
+        self.store
+            .session()
+            .target(&Target::branch(&review.branch_id))
+            .set("status", "open")?;
+        self.store
+            .set_lifecycle(&ticket_id, TicketStatus::Open, TicketState::Review)?;
+        self.clear_review_caches();
+        self.reload_all(Some(ticket_id), None)?;
+        self.select_review_ticket_by_id(ticket_id);
+        self.review_detail = self
+            .all_tickets
+            .iter()
+            .position(|ticket| ticket.id == ticket_id);
+        self.status = Some(format!("Reopened review {}.", review.branch_id));
+        Ok(())
+    }
+
+    fn update_selected_review_from_branch(&mut self) -> Result<()> {
+        let Some((ticket_id, review)) = self.selected_review_context_for_edit() else {
+            self.status = Some("Select a review first.".to_string());
+            return Ok(());
+        };
+        let branch_name = review
+            .branch_name
+            .clone()
+            .unwrap_or_else(|| review.branch_id.clone());
+        let snapshot = load_review_branch_snapshot(&branch_name)?;
+        if snapshot.head_sha.is_empty() {
+            self.status = Some(format!("Could not resolve head for {branch_name}."));
+            return Ok(());
+        }
+        if review.head_sha.as_deref() == Some(snapshot.head_sha.as_str()) {
+            self.review_status_cache = load_review_status_cache(&self.store, &self.ticket_reviews);
+            self.status = Some(format!(
+                "Review {} is already at {}.",
+                review.branch_id,
+                short_hash(&snapshot.head_sha)
+            ));
+            return Ok(());
+        }
+
+        let target = self
+            .store
+            .session()
+            .target(&Target::branch(&review.branch_id));
+        let base_is_empty = meta_string(target.get_value("base:sha").ok().flatten())
+            .is_none_or(|base| base.is_empty());
+        if base_is_empty && !snapshot.base_sha.is_empty() {
+            target.set("base:sha", snapshot.base_sha.as_str())?;
+        }
+        target.set("head:sha", snapshot.head_sha.as_str())?;
+        refresh_review_revisions_from_commits(&self.store, &review.branch_id, &snapshot.commits)?;
+
+        self.clear_review_caches();
+        self.reload_all(Some(ticket_id), None)?;
+        self.select_review_ticket_by_id(ticket_id);
+        if self.review_detail.is_some() {
+            self.review_detail = self
+                .all_tickets
+                .iter()
+                .position(|ticket| ticket.id == ticket_id);
+        }
+        self.status = Some(format!(
+            "Updated review {} to {}.",
+            review.branch_id,
+            short_hash(&snapshot.head_sha)
+        ));
+        Ok(())
+    }
+
     fn linked_writeups(&self, ticket_id: uuid::Uuid) -> Vec<&Writeup> {
         self.writeups
             .iter()
@@ -4109,6 +5869,7 @@ impl App {
                 };
                 self.jump_to_ticket(ticket_id);
             }
+            TuiTab::Reviews => {}
             TuiTab::Dashboard => {}
         }
     }
@@ -5054,11 +6815,16 @@ impl App {
                 .min(self.visible_writeups.len() - 1);
             self.writeup_state.select(Some(selected));
         }
+        self.sync_review_selection();
     }
 
     fn next(&mut self) {
         if self.active_tab == TuiTab::Writeups {
             self.next_writeup();
+            return;
+        }
+        if self.active_tab == TuiTab::Reviews {
+            self.next_review();
             return;
         }
         if self.active_tab == TuiTab::Dashboard {
@@ -5077,6 +6843,10 @@ impl App {
     fn previous(&mut self) {
         if self.active_tab == TuiTab::Writeups {
             self.previous_writeup();
+            return;
+        }
+        if self.active_tab == TuiTab::Reviews {
+            self.previous_review();
             return;
         }
         if self.active_tab == TuiTab::Dashboard {
@@ -5106,6 +6876,491 @@ impl App {
         let next = (selected + 1) % self.visible_writeups.len();
         self.writeup_state.select(Some(next));
         self.sync_open_writeup_detail();
+    }
+
+    fn review_ticket_indices(&self) -> Vec<usize> {
+        let needle = self.filter.to_ascii_lowercase();
+        self.all_tickets
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, ticket)| {
+                let review = self.ticket_reviews.get(&ticket.id)?;
+                if (self.show_all_reviews || review_is_open(ticket, review))
+                    && (needle.is_empty()
+                        || ticket_matches(ticket, &needle)
+                        || review_matches(review, &needle))
+                    && ticket_matches_tag_filter(
+                        ticket,
+                        &self.tag_filter,
+                        self.tag_filter_match_all,
+                    )
+                {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn next_review(&mut self) {
+        let indices = self.review_ticket_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let selected = self.review_state.selected().unwrap_or(0);
+        self.review_state
+            .select(Some((selected + 1) % indices.len()));
+        self.sync_open_review_detail();
+    }
+
+    fn previous_review(&mut self) {
+        let indices = self.review_ticket_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let selected = self.review_state.selected().unwrap_or(0);
+        let previous = selected
+            .checked_sub(1)
+            .unwrap_or_else(|| indices.len().saturating_sub(1));
+        self.review_state.select(Some(previous));
+        self.sync_open_review_detail();
+    }
+
+    fn next_review_branch_choice(&mut self) {
+        if self.review_branch_choices.is_empty() {
+            return;
+        }
+        let selected = self.review_branch_state.selected().unwrap_or(0);
+        self.review_branch_state
+            .select(Some((selected + 1) % self.review_branch_choices.len()));
+    }
+
+    fn previous_review_branch_choice(&mut self) {
+        if self.review_branch_choices.is_empty() {
+            return;
+        }
+        let selected = self.review_branch_state.selected().unwrap_or(0);
+        let previous = selected
+            .checked_sub(1)
+            .unwrap_or_else(|| self.review_branch_choices.len().saturating_sub(1));
+        self.review_branch_state.select(Some(previous));
+    }
+
+    fn review_commit_count(&self) -> usize {
+        self.review_detail
+            .and_then(|idx| self.all_tickets.get(idx))
+            .and_then(|ticket| self.ticket_reviews.get(&ticket.id))
+            .map(review_commits)
+            .map(|commits| commits.len())
+            .unwrap_or_default()
+    }
+
+    fn next_review_commit(&mut self) {
+        let len = self.review_commit_count();
+        if len == 0 {
+            self.review_commit_state.select(None);
+            return;
+        }
+        let selected = self.review_commit_state.selected().unwrap_or(0);
+        self.select_review_commit((selected + 1) % len);
+    }
+
+    fn select_review_commit(&mut self, idx: usize) {
+        let len = self.review_commit_count();
+        if len == 0 || idx >= len {
+            return;
+        }
+        self.review_commit_state.select(Some(idx));
+        self.review_diff_scroll = 0;
+        self.review_diff_line_focus = 0;
+        self.review_discussion_scroll = 0;
+        self.review_diff_file_state.select(None);
+        self.review_diff_toc_state.select(None);
+    }
+
+    fn previous_review_commit(&mut self) {
+        let len = self.review_commit_count();
+        if len == 0 {
+            self.review_commit_state.select(None);
+            return;
+        }
+        let selected = self.review_commit_state.selected().unwrap_or(0);
+        let previous = selected.checked_sub(1).unwrap_or_else(|| len - 1);
+        self.select_review_commit(previous);
+    }
+
+    fn selected_review_commit_position(&self, review: &TicketReview) -> Option<(usize, usize)> {
+        let len = review_commits(review).len();
+        if len == 0 {
+            return None;
+        }
+        Some((
+            self.review_commit_state
+                .selected()
+                .unwrap_or(0)
+                .min(len - 1)
+                + 1,
+            len,
+        ))
+    }
+
+    fn sync_review_commit_pane_focus(&mut self) {
+        if !self.review_diff_toc_open && self.review_commit_pane_focus == ReviewCommitPaneFocus::Toc
+        {
+            self.review_commit_pane_focus = ReviewCommitPaneFocus::Diff;
+        }
+    }
+
+    fn focus_next_review_commit_pane(&mut self) {
+        self.sync_review_commit_pane_focus();
+        self.review_commit_pane_focus =
+            match (self.review_diff_toc_open, self.review_commit_pane_focus) {
+                (true, ReviewCommitPaneFocus::Toc) => ReviewCommitPaneFocus::Diff,
+                (true, ReviewCommitPaneFocus::Diff) => ReviewCommitPaneFocus::Comments,
+                (true, ReviewCommitPaneFocus::Comments) => ReviewCommitPaneFocus::Toc,
+                (false, ReviewCommitPaneFocus::Diff) => ReviewCommitPaneFocus::Comments,
+                (false, ReviewCommitPaneFocus::Comments) | (false, ReviewCommitPaneFocus::Toc) => {
+                    ReviewCommitPaneFocus::Diff
+                }
+            };
+    }
+
+    fn focus_previous_review_commit_pane(&mut self) {
+        self.sync_review_commit_pane_focus();
+        self.review_commit_pane_focus =
+            match (self.review_diff_toc_open, self.review_commit_pane_focus) {
+                (true, ReviewCommitPaneFocus::Toc) => ReviewCommitPaneFocus::Comments,
+                (true, ReviewCommitPaneFocus::Diff) => ReviewCommitPaneFocus::Toc,
+                (true, ReviewCommitPaneFocus::Comments) => ReviewCommitPaneFocus::Diff,
+                (false, ReviewCommitPaneFocus::Diff) => ReviewCommitPaneFocus::Comments,
+                (false, ReviewCommitPaneFocus::Comments) | (false, ReviewCommitPaneFocus::Toc) => {
+                    ReviewCommitPaneFocus::Diff
+                }
+            };
+    }
+
+    fn scroll_review_commit_pane(&mut self, delta: i16) {
+        self.sync_review_commit_pane_focus();
+        match self.review_commit_pane_focus {
+            ReviewCommitPaneFocus::Toc => {
+                if delta.is_negative() {
+                    self.previous_review_diff_toc_entry();
+                } else {
+                    self.next_review_diff_toc_entry();
+                }
+            }
+            ReviewCommitPaneFocus::Diff => self.scroll_review_diff(delta),
+            ReviewCommitPaneFocus::Comments => self.scroll_review_discussion(delta),
+        }
+    }
+
+    fn scroll_review_commit_pane_page(&mut self, direction: i16) {
+        self.sync_review_commit_pane_focus();
+        match self.review_commit_pane_focus {
+            ReviewCommitPaneFocus::Toc => self.scroll_review_diff_toc_page(direction),
+            ReviewCommitPaneFocus::Diff => self.scroll_review_diff_page(direction),
+            ReviewCommitPaneFocus::Comments => self.scroll_review_discussion_page(direction),
+        }
+    }
+
+    fn scroll_review_discussion(&mut self, delta: i16) {
+        self.review_discussion_scroll = if delta.is_negative() {
+            self.review_discussion_scroll
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.review_discussion_scroll.saturating_add(delta as u16)
+        };
+    }
+
+    fn scroll_review_discussion_page(&mut self, direction: i16) {
+        let amount = self.review_discussion_page_height.saturating_sub(1).max(1);
+        self.review_discussion_scroll = if direction.is_negative() {
+            self.review_discussion_scroll.saturating_sub(amount)
+        } else {
+            self.review_discussion_scroll.saturating_add(amount)
+        };
+    }
+
+    fn scroll_review_diff(&mut self, delta: i16) {
+        if self.current_review_diff_has_folded_files() {
+            if delta.is_negative() {
+                self.previous_review_diff_file();
+            } else {
+                self.next_review_diff_file();
+            }
+            return;
+        }
+        self.review_diff_line_focus = if delta.is_negative() {
+            self.review_diff_line_focus
+                .saturating_sub(delta.unsigned_abs())
+        } else {
+            self.review_diff_line_focus.saturating_add(delta as u16)
+        };
+    }
+
+    fn scroll_review_diff_page(&mut self, direction: i16) {
+        if self.current_review_diff_has_folded_files() {
+            return;
+        }
+        let amount = self.review_diff_page_height.saturating_sub(1).max(1);
+        self.review_diff_line_focus = if direction.is_negative() {
+            self.review_diff_line_focus.saturating_sub(amount)
+        } else {
+            self.review_diff_line_focus.saturating_add(amount)
+        };
+    }
+
+    fn current_review_commit_sha(&self) -> Option<String> {
+        let (_, review) = self.selected_review_context_owned()?;
+        self.selected_review_commit_sha(&review)
+    }
+
+    fn toggle_review_diff_toc(&mut self) {
+        if self.review_diff_toc_open {
+            self.review_diff_toc_open = false;
+            if self.review_commit_pane_focus == ReviewCommitPaneFocus::Toc {
+                self.review_commit_pane_focus = ReviewCommitPaneFocus::Diff;
+            }
+            return;
+        }
+        let Some(sha) = self.current_review_commit_sha() else {
+            return;
+        };
+        let entries = self.review_diff_render_cached(&sha).toc_entries;
+        if entries.is_empty() {
+            self.status = Some("No files or hunks in this diff.".to_string());
+            return;
+        }
+        self.review_diff_toc_open = true;
+        self.review_commit_pane_focus = ReviewCommitPaneFocus::Toc;
+        self.sync_review_diff_toc_selection_for(entries.len());
+    }
+
+    fn sync_review_diff_toc_selection_for(&mut self, len: usize) {
+        if len == 0 {
+            self.review_diff_toc_state.select(None);
+            return;
+        }
+        let selected = self
+            .review_diff_toc_state
+            .selected()
+            .unwrap_or(0)
+            .min(len - 1);
+        self.review_diff_toc_state.select(Some(selected));
+    }
+
+    fn next_review_diff_toc_entry(&mut self) {
+        let len = self.current_review_diff_toc_entries().len();
+        if len == 0 {
+            self.review_diff_toc_state.select(None);
+            return;
+        }
+        let selected = self.review_diff_toc_state.selected().unwrap_or(0);
+        self.review_diff_toc_state
+            .select(Some((selected + 1) % len));
+    }
+
+    fn previous_review_diff_toc_entry(&mut self) {
+        let len = self.current_review_diff_toc_entries().len();
+        if len == 0 {
+            self.review_diff_toc_state.select(None);
+            return;
+        }
+        let selected = self.review_diff_toc_state.selected().unwrap_or(0);
+        let previous = selected.checked_sub(1).unwrap_or_else(|| len - 1);
+        self.review_diff_toc_state.select(Some(previous));
+    }
+
+    fn scroll_review_diff_toc_page(&mut self, direction: i16) {
+        let len = self.current_review_diff_toc_entries().len();
+        if len == 0 {
+            self.review_diff_toc_state.select(None);
+            return;
+        }
+        let selected = self.review_diff_toc_state.selected().unwrap_or(0);
+        let amount = usize::from(self.review_diff_page_height.saturating_sub(1).max(1));
+        let next = if direction.is_negative() {
+            selected.saturating_sub(amount)
+        } else {
+            selected.saturating_add(amount).min(len - 1)
+        };
+        self.review_diff_toc_state.select(Some(next));
+    }
+
+    fn current_review_diff_toc_entries(&mut self) -> Vec<DiffTocEntry> {
+        let Some(sha) = self.current_review_commit_sha() else {
+            return Vec::new();
+        };
+        self.review_diff_render_cached(&sha)
+            .toc_entries
+            .as_ref()
+            .clone()
+    }
+
+    fn jump_to_selected_review_diff_toc_entry(&mut self) {
+        let entries = self.current_review_diff_toc_entries();
+        let Some(entry) = self
+            .review_diff_toc_state
+            .selected()
+            .and_then(|idx| entries.get(idx))
+        else {
+            self.status = Some("No diff entry selected.".to_string());
+            return;
+        };
+        self.review_diff_line_focus = entry.target_line.min(usize::from(u16::MAX)) as u16;
+        self.review_diff_scroll = self.review_diff_line_focus;
+        self.review_commit_pane_focus = ReviewCommitPaneFocus::Diff;
+    }
+
+    fn toggle_current_review_file_diff(&mut self) {
+        let Some(sha) = self.current_review_commit_sha() else {
+            return;
+        };
+        let Some(file) = self.selected_review_diff_file(&sha) else {
+            self.status = Some("No diff file at this scroll position.".to_string());
+            return;
+        };
+        let files = self.review_diff_render_cached(&sha).files;
+        let collapsed = self.review_collapsed_diff_files.entry(sha).or_default();
+        if collapsed.remove(&file) {
+            self.review_diff_line_focus = self.review_diff_scroll;
+            self.status = Some(format!("Expanded {file}."));
+        } else {
+            collapsed.insert(file.clone());
+            self.status = Some(format!("Folded {file}."));
+        }
+        if let Some(idx) = files.iter().position(|candidate| candidate == &file) {
+            self.review_diff_file_state.select(Some(idx));
+        }
+    }
+
+    fn toggle_all_review_file_diffs(&mut self) {
+        let Some(sha) = self.current_review_commit_sha() else {
+            return;
+        };
+        let files = self.review_diff_render_cached(&sha).files;
+        if files.is_empty() {
+            self.status = Some("No files in this diff.".to_string());
+            return;
+        }
+        let collapsed = self.review_collapsed_diff_files.entry(sha).or_default();
+        let all_collapsed = files.iter().all(|file| collapsed.contains(file));
+        if all_collapsed {
+            for file in files.iter() {
+                collapsed.remove(file);
+            }
+            self.review_diff_file_state.select(None);
+            self.status = Some("Expanded all files.".to_string());
+        } else {
+            let file_count = files.len();
+            collapsed.extend(files.iter().cloned());
+            self.sync_review_diff_file_selection_for(file_count);
+            self.status = Some("Folded all files.".to_string());
+        }
+    }
+
+    fn selected_review_diff_file(&mut self, sha: &str) -> Option<String> {
+        let render = self.review_diff_render_cached(sha);
+        let files = &render.files;
+        let collapsed = self
+            .review_collapsed_diff_files
+            .get(sha)
+            .cloned()
+            .unwrap_or_default();
+        if !collapsed.is_empty() {
+            self.sync_review_diff_file_selection_for(files.len());
+            return self
+                .review_diff_file_state
+                .selected()
+                .and_then(|idx| files.get(idx))
+                .cloned();
+        }
+
+        diff_file_at_scroll(
+            render.spans.as_slice(),
+            usize::from(self.review_diff_line_focus),
+        )
+    }
+
+    fn current_review_diff_has_folded_files(&mut self) -> bool {
+        let Some(sha) = self.current_review_commit_sha() else {
+            return false;
+        };
+        self.review_collapsed_diff_files
+            .get(&sha)
+            .is_some_and(|files| !files.is_empty())
+    }
+
+    fn sync_review_diff_file_selection_for(&mut self, len: usize) {
+        if len == 0 {
+            self.review_diff_file_state.select(None);
+            return;
+        }
+        let selected = self
+            .review_diff_file_state
+            .selected()
+            .unwrap_or(0)
+            .min(len - 1);
+        self.review_diff_file_state.select(Some(selected));
+    }
+
+    fn next_review_diff_file(&mut self) {
+        let Some(sha) = self.current_review_commit_sha() else {
+            return;
+        };
+        let len = self.review_diff_render_cached(&sha).files.len();
+        if len == 0 {
+            self.review_diff_file_state.select(None);
+            return;
+        }
+        let selected = self.review_diff_file_state.selected().unwrap_or(0);
+        self.review_diff_file_state
+            .select(Some((selected + 1) % len));
+    }
+
+    fn previous_review_diff_file(&mut self) {
+        let Some(sha) = self.current_review_commit_sha() else {
+            return;
+        };
+        let len = self.review_diff_render_cached(&sha).files.len();
+        if len == 0 {
+            self.review_diff_file_state.select(None);
+            return;
+        }
+        let selected = self.review_diff_file_state.selected().unwrap_or(0);
+        let previous = selected.checked_sub(1).unwrap_or_else(|| len - 1);
+        self.review_diff_file_state.select(Some(previous));
+    }
+
+    fn toggle_review_mode(&mut self) {
+        match self.review_mode {
+            ReviewMode::Summary => {
+                if self.review_commit_count() == 0 {
+                    self.status = Some("No review commits recorded yet.".to_string());
+                } else {
+                    self.review_mode = ReviewMode::Commits;
+                    self.sync_review_commit_selection_for(self.review_commit_count());
+                }
+            }
+            ReviewMode::Commits => {
+                if self.review_commit_count() == 0 {
+                    self.status = Some("No commit selected.".to_string());
+                } else {
+                    self.review_mode = ReviewMode::Commit;
+                    self.review_diff_scroll = 0;
+                    self.review_diff_line_focus = 0;
+                    self.review_discussion_scroll = 0;
+                    self.review_commit_pane_focus = ReviewCommitPaneFocus::Diff;
+                    self.review_diff_file_state.select(None);
+                    self.review_diff_toc_open = false;
+                    self.review_diff_toc_state.select(None);
+                }
+            }
+            ReviewMode::Commit => {
+                self.review_mode = ReviewMode::Commits;
+            }
+        }
     }
 
     fn previous_writeup(&mut self) {
@@ -5242,7 +7497,7 @@ impl App {
     }
 
     fn resize_detail(&mut self, delta: i16) {
-        if self.detail.is_none() && self.writeup_detail.is_none() {
+        if self.detail.is_none() && self.writeup_detail.is_none() && self.review_detail.is_none() {
             self.status = Some("Open details first.".to_string());
             return;
         }
@@ -5273,11 +7528,213 @@ impl App {
         state.save()
     }
 
+    fn review_commit_info_cached(&mut self, sha: &str) -> ReviewCommitInfo {
+        if let Some(info) = self.review_commit_cache.get(sha) {
+            return info.clone();
+        }
+        if let Some(info) = self.read_review_commit_info_cache(sha) {
+            self.review_commit_cache
+                .insert(sha.to_string(), info.clone());
+            return info;
+        }
+        let info = review_commit_info(sha);
+        self.write_review_commit_info_cache(sha, &info);
+        self.review_commit_cache
+            .insert(sha.to_string(), info.clone());
+        info
+    }
+
+    fn review_commit_updated_or_queue(&mut self, sha: &str) -> String {
+        if let Some(info) = self.review_commit_cache.get(sha) {
+            return info.updated.clone();
+        }
+        if let Some(info) = self.read_review_commit_info_cache(sha) {
+            let updated = info.updated.clone();
+            self.review_commit_cache.insert(sha.to_string(), info);
+            return updated;
+        }
+        self.queue_review_commit_info_load(sha);
+        "-".to_string()
+    }
+
+    fn queue_review_commit_info_load(&mut self, sha: &str) {
+        if self.review_commit_cache.contains_key(sha)
+            || self.review_commit_info_inflight.contains(sha)
+        {
+            return;
+        }
+        if let Some(info) = self.read_review_commit_info_cache(sha) {
+            self.review_commit_cache.insert(sha.to_string(), info);
+            return;
+        }
+        let sender = self.review_commit_info_sender.clone();
+        let sha = sha.to_string();
+        let cache_path = self.review_commit_info_cache_path(&sha);
+        self.review_commit_info_inflight.insert(sha.clone());
+        thread::spawn(move || {
+            let info = read_review_commit_info_cache_file(&cache_path).unwrap_or_else(|| {
+                let info = review_commit_info(&sha);
+                write_review_commit_info_cache_file(&cache_path, &info);
+                info
+            });
+            let _ = sender.send(ReviewCommitInfoLoad { sha, info });
+        });
+    }
+
+    fn poll_review_commit_info_loads(&mut self) {
+        while let Ok(load) = self.review_commit_info_receiver.try_recv() {
+            self.review_commit_info_inflight.remove(&load.sha);
+            self.review_commit_cache.insert(load.sha, load.info);
+        }
+    }
+
+    fn review_commit_info_cache_path(&self, sha: &str) -> PathBuf {
+        self.store
+            .session()
+            .repo_git_dir()
+            .join("ticgit")
+            .join("meta")
+            .join(format!("{sha}.json"))
+    }
+
+    fn read_review_commit_info_cache(&self, sha: &str) -> Option<ReviewCommitInfo> {
+        read_review_commit_info_cache_file(&self.review_commit_info_cache_path(sha))
+    }
+
+    fn write_review_commit_info_cache(&self, sha: &str, info: &ReviewCommitInfo) {
+        write_review_commit_info_cache_file(&self.review_commit_info_cache_path(sha), info);
+    }
+
+    fn commit_review_status_cached(&mut self, sha: &str) -> CommitReviewStatus {
+        if let Some(status) = self.review_status_cache.get(sha) {
+            return status.clone();
+        }
+        let status = commit_review_status(&self.store, sha);
+        self.review_status_cache
+            .insert(sha.to_string(), status.clone());
+        status
+    }
+
+    fn commit_patch_lines_cached(&mut self, sha: &str) -> Vec<String> {
+        if let Some(lines) = self.review_patch_cache.get(sha) {
+            return lines.clone();
+        }
+        let lines = commit_patch_lines(sha);
+        self.review_patch_cache
+            .insert(sha.to_string(), lines.clone());
+        lines
+    }
+
+    fn review_diff_render_cached(&mut self, sha: &str) -> ReviewDiffRender {
+        let collapsed = self
+            .review_collapsed_diff_files
+            .get(sha)
+            .cloned()
+            .unwrap_or_default();
+        let key = review_diff_render_cache_key(sha, &collapsed);
+        if let Some(render) = self.review_diff_render_cache.get(&key) {
+            return render.clone();
+        }
+        let info = self.review_commit_info_cached(sha);
+        let patch_lines = self.commit_patch_lines_cached(sha);
+        let render = ReviewDiffRender {
+            line_count: review_diff_rendered_line_count(&info, &patch_lines, &collapsed),
+            spans: Arc::new(review_diff_file_spans(&info, &patch_lines, &collapsed)),
+            toc_entries: Arc::new(review_diff_toc_entries(&info, &patch_lines, &collapsed)),
+            files: Arc::new(diff_file_keys(&patch_lines)),
+        };
+        self.review_diff_render_cache.insert(key, render.clone());
+        render
+    }
+
+    fn review_changed_file_count_cached(&mut self, commits: &[String]) -> usize {
+        let Some(head) = commits.first() else {
+            return 0;
+        };
+        let Some(oldest) = commits.last() else {
+            return 0;
+        };
+        let key = format!("{oldest}..{head}");
+        if let Some(count) = self.review_file_count_cache.get(&key) {
+            return *count;
+        }
+        let count = review_changed_file_count(oldest, head);
+        self.review_file_count_cache.insert(key, count);
+        count
+    }
+
+    fn clear_review_caches(&mut self) {
+        self.review_commit_cache.clear();
+        self.review_status_cache.clear();
+        self.review_patch_cache.clear();
+        self.review_file_count_cache.clear();
+        self.review_diff_render_cache.clear();
+    }
+
+    fn create_review_from_selected_branch(&mut self) -> Result<bool> {
+        let Some(choice) = self
+            .review_branch_state
+            .selected()
+            .and_then(|idx| self.review_branch_choices.get(idx))
+            .cloned()
+        else {
+            self.status = Some("Select a branch first.".to_string());
+            return Ok(false);
+        };
+
+        let snapshot = load_review_branch_snapshot(&choice.name)?;
+        let title = review_ticket_title(&choice.name, &snapshot);
+        let ticket = self.store.create(
+            &title,
+            NewTicketOpts {
+                comment: None,
+                tags: Vec::new(),
+                assigned: None,
+                parent: None,
+                ..Default::default()
+            },
+        )?;
+        self.store
+            .set_lifecycle(&ticket.id, TicketStatus::Open, TicketState::Review)?;
+        self.store.set_description(
+            &ticket.id,
+            Some(&review_ticket_description(&choice.name, &snapshot)),
+        )?;
+        let ticket = self.store.load(&ticket.id)?;
+        let branch_id = create_review_for_ticket(&self.store, &ticket, &choice.name, &snapshot)?;
+        self.status = Some(format!(
+            "Created review ticket {} for {}.",
+            ticket.short_id(),
+            choice.name
+        ));
+        self.clear_review_caches();
+        self.reload_all(Some(ticket.id), None)?;
+        if let Some(idx) = self
+            .all_tickets
+            .iter()
+            .position(|item| item.id == ticket.id)
+        {
+            self.review_detail = Some(idx);
+            self.review_mode = ReviewMode::Summary;
+            self.review_commit_state.select(None);
+        }
+        self.select_review_ticket_by_id(ticket.id);
+        if let Some(review) = self.ticket_reviews.get_mut(&ticket.id) {
+            review.branch_id = branch_id;
+        }
+        Ok(true)
+    }
+
     fn refresh_data(&mut self) -> Result<()> {
         let selected_id = self.selected_ticket().map(|ticket| ticket.id);
         let selected_writeup_id = self.selected_writeup().map(|writeup| writeup.id);
+        let selected_review_id = self.selected_review_ticket().map(|ticket| ticket.id);
         let was_board = self.view == ViewMode::Board && self.detail.is_none();
+        self.clear_review_caches();
         self.reload_all(selected_id, selected_writeup_id)?;
+        if let Some(id) = selected_review_id {
+            self.select_review_ticket_by_id(id);
+        }
         if was_board {
             if let Some(id) = selected_id {
                 self.select_board_ticket_by_id(id);
@@ -5294,7 +7751,8 @@ impl App {
                 self.view = ViewMode::List;
                 TuiTab::Writeups
             }
-            TuiTab::Writeups => TuiTab::Issues,
+            TuiTab::Writeups => TuiTab::Reviews,
+            TuiTab::Reviews => TuiTab::Issues,
             TuiTab::Dashboard => TuiTab::Issues,
         };
     }
@@ -5342,6 +7800,7 @@ impl App {
         self.active_tab = TuiTab::Dashboard;
         self.detail = None;
         self.writeup_detail = None;
+        self.review_detail = None;
         self.comments_mode = false;
     }
 
@@ -5391,6 +7850,10 @@ impl App {
             self.open_selected_writeup();
             return;
         }
+        if self.active_tab == TuiTab::Reviews {
+            self.open_selected_review();
+            return;
+        }
         if let Some(idx) = self.selected_ticket_index() {
             self.detail = Some(idx);
             self.select_list_ticket_by_index(idx);
@@ -5419,6 +7882,23 @@ impl App {
         }
     }
 
+    fn open_selected_review(&mut self) {
+        let indices = self.review_ticket_indices();
+        if let Some(idx) = self
+            .review_state
+            .selected()
+            .and_then(|selected| indices.get(selected))
+            .copied()
+        {
+            if self.review_detail != Some(idx) {
+                self.review_mode = ReviewMode::Summary;
+                self.review_commit_state.select(None);
+            }
+            self.review_detail = Some(idx);
+            self.select_review_ticket_by_index(idx);
+        }
+    }
+
     fn open_ticket_by_id(&mut self, id: uuid::Uuid) {
         let list_indices = self.list_ticket_indices();
         if let Some(list_pos) = list_indices
@@ -5442,6 +7922,87 @@ impl App {
         if self.writeup_detail.is_some() {
             self.open_selected_writeup();
         }
+    }
+
+    fn sync_open_review_detail(&mut self) {
+        if self.review_detail.is_some() {
+            self.open_selected_review();
+        }
+    }
+
+    fn sync_review_selection(&mut self) {
+        let indices = self.review_ticket_indices();
+        self.review_detail = self.review_detail.filter(|idx| indices.contains(idx));
+        if self.review_detail.is_none() {
+            self.review_mode = ReviewMode::Summary;
+            self.review_commit_state.select(None);
+        }
+        if indices.is_empty() {
+            self.review_state.select(None);
+        } else {
+            let selected = self
+                .review_state
+                .selected()
+                .unwrap_or(0)
+                .min(indices.len() - 1);
+            self.review_state.select(Some(selected));
+        }
+    }
+
+    fn sync_review_commit_selection_for(&mut self, len: usize) {
+        if len == 0 {
+            self.review_commit_state.select(None);
+        } else {
+            let selected = self
+                .review_commit_state
+                .selected()
+                .unwrap_or(0)
+                .min(len - 1);
+            self.review_commit_state.select(Some(selected));
+        }
+    }
+
+    fn select_review_ticket_by_index(&mut self, idx: usize) {
+        if let Some(pos) = self
+            .review_ticket_indices()
+            .iter()
+            .position(|review_idx| *review_idx == idx)
+        {
+            self.review_state.select(Some(pos));
+        }
+    }
+
+    fn select_review_ticket_by_id(&mut self, id: uuid::Uuid) {
+        let Some(idx) = self.all_tickets.iter().position(|ticket| ticket.id == id) else {
+            return;
+        };
+        self.select_review_ticket_by_index(idx);
+        if self.review_detail.is_some() {
+            self.review_detail = Some(idx);
+        }
+    }
+
+    fn selected_review_context_owned(&self) -> Option<(Ticket, TicketReview)> {
+        let ticket = self
+            .review_detail
+            .and_then(|idx| self.all_tickets.get(idx))?;
+        let review = self.ticket_reviews.get(&ticket.id)?;
+        Some((ticket.clone(), review.clone()))
+    }
+
+    fn selected_review_context_for_edit(&self) -> Option<(uuid::Uuid, TicketReview)> {
+        let ticket = self.selected_review_ticket()?;
+        let review = self.ticket_reviews.get(&ticket.id)?;
+        Some((ticket.id, review.clone()))
+    }
+
+    fn selected_review_commit_sha(&self, review: &TicketReview) -> Option<String> {
+        let commits = review_commits(review);
+        self.review_commit_state
+            .selected()
+            .and_then(|idx| commits.get(idx))
+            .cloned()
+            .or_else(|| commits.first().cloned())
     }
 
     fn board_column_tickets(&self, column: usize) -> Vec<&usize> {
@@ -5585,6 +8146,14 @@ impl App {
                     ticket.tags.clone(),
                 ))
             }
+            TuiTab::Reviews => {
+                let ticket = self.selected_review_ticket()?;
+                Some((
+                    TagTarget::Ticket(ticket.id),
+                    ticket.short_id(),
+                    ticket.tags.clone(),
+                ))
+            }
             TuiTab::Writeups => {
                 let writeup = self.selected_writeup()?;
                 Some((
@@ -5624,6 +8193,25 @@ impl App {
             .selected()
             .and_then(|selected| self.visible_writeups.get(selected))
             .copied()
+    }
+
+    fn selected_review_ticket(&self) -> Option<&Ticket> {
+        if self.active_tab != TuiTab::Reviews {
+            return None;
+        }
+        self.review_state
+            .selected()
+            .and_then(|selected| self.review_ticket_indices().get(selected).copied())
+            .map(|idx| &self.all_tickets[idx])
+    }
+
+    fn open_review_branch_names(&self) -> BTreeSet<String> {
+        self.ticket_reviews
+            .values()
+            .filter(|review| !matches!(review.status.as_str(), "closed" | "merged"))
+            .filter_map(|review| review.branch_name.as_deref())
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -5813,6 +8401,55 @@ fn append_menu_separator(spans: &mut Vec<Span<'static>>) {
     spans.push(Span::raw("  "));
 }
 
+fn table_row_width(area: Rect, block: &Block<'_>) -> usize {
+    usize::from(block.inner(area).width)
+}
+
+fn render_table_list_frame(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'_>,
+    header: Line<'static>,
+) -> Rect {
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+    frame.render_widget(Paragraph::new(header), chunks[0]);
+    chunks[1]
+}
+
+fn list_highlight_style() -> Style {
+    Style::default()
+        .bg(Color::Rgb(0, 0, 95))
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn table_header_line(columns: &[(&'static str, usize)], width: usize) -> Line<'static> {
+    let mut spans = vec![Span::raw(
+        " ".repeat(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL)),
+    )];
+    for (idx, (label, column_width)) in columns.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            fit_display(label, *column_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    Line::from(spans)
+}
+
 fn parse_optional_i64(raw: &str, label: &str) -> Result<Option<i64>> {
     let Some(value) = optional_trimmed(raw) else {
         return Ok(None);
@@ -5902,7 +8539,2062 @@ fn tabs_title(active: TuiTab, title: &str) -> String {
     } else {
         " writeups "
     };
-    format!("{issues} {writeups}  {title}")
+    let reviews = if active == TuiTab::Reviews {
+        "[reviews]"
+    } else {
+        " reviews "
+    };
+    format!("{issues} {writeups} {reviews}  {title}")
+}
+
+fn view_state_title(title: String) -> Line<'static> {
+    Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(Color::LightCyan)
+            .bg(Color::Rgb(24, 24, 56))
+            .add_modifier(Modifier::BOLD),
+    ))
+    .right_aligned()
+}
+
+fn load_review_branch_choices(
+    open_review_branches: &BTreeSet<String>,
+) -> Result<Vec<ReviewBranchChoice>> {
+    let output = Command::new("but")
+        .args(["branch", "list", "--json"])
+        .output()
+        .with_context(|| "running but branch list --json")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "but branch list --json failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let branch_list: ButBranchList =
+        serde_json::from_slice(&output.stdout).with_context(|| "parsing but branch list --json")?;
+    let mut branches = branch_list.branches;
+    for stack in branch_list.applied_stacks {
+        branches.extend(stack.heads);
+    }
+
+    let mut choices = branches
+        .into_iter()
+        .filter(|branch| !open_review_branches.contains(&branch.name))
+        .map(|branch| ReviewBranchChoice {
+            name: branch.name,
+            last_commit_at: branch
+                .last_commit_at
+                .and_then(|millis| OffsetDateTime::from_unix_timestamp(millis / 1000).ok()),
+            commits_ahead: branch.commits_ahead,
+            author: branch_author_display(branch.last_author),
+        })
+        .collect::<Vec<_>>();
+    choices.sort_by(|a, b| {
+        b.last_commit_at
+            .cmp(&a.last_commit_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let mut seen = BTreeSet::new();
+    choices.retain(|choice| seen.insert(choice.name.clone()));
+    Ok(choices)
+}
+
+fn branch_author_display(author: Option<ButAuthor>) -> String {
+    author
+        .and_then(|author| author.name.or(author.email))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn load_review_branch_snapshot(branch_name: &str) -> Result<ReviewBranchSnapshot> {
+    let output = Command::new("but")
+        .args(["branch", "show", branch_name, "--json"])
+        .output()
+        .with_context(|| format!("running but branch show {branch_name} --json"))?;
+    if output.status.success() {
+        return parse_review_branch_snapshot(branch_name, &output.stdout);
+    }
+
+    let base_sha = review_base_sha(branch_name)?;
+    let head_sha = resolve_git_ref(branch_name).or_else(|_| resolve_git_ref("HEAD"))?;
+    let commits = review_revision_list(&base_sha, &head_sha)?;
+    Ok(ReviewBranchSnapshot {
+        base_sha,
+        head_sha: head_sha.clone(),
+        commits,
+        title: review_commit_info(&head_sha).subject,
+    })
+}
+
+fn parse_review_branch_snapshot(branch_name: &str, json: &[u8]) -> Result<ReviewBranchSnapshot> {
+    let show: ButBranchShow =
+        serde_json::from_slice(json).with_context(|| "parsing but branch show --json")?;
+    let head = show.commits.first();
+    let head_sha = head
+        .map(|commit| commit.sha.clone())
+        .filter(|sha| !sha.is_empty())
+        .unwrap_or_else(|| resolve_git_ref(branch_name).unwrap_or_default());
+    let commits = show
+        .commits
+        .iter()
+        .map(|commit| commit.sha.clone())
+        .filter(|sha| !sha.is_empty())
+        .collect::<Vec<_>>();
+    let base_sha = show
+        .base_commit
+        .map(|base| base.sha)
+        .filter(|sha| !sha.is_empty())
+        .or_else(|| review_base_from_commits(&commits))
+        .unwrap_or_else(|| {
+            review_base_sha(branch_name)
+                .unwrap_or_else(|_| resolve_git_ref("HEAD").unwrap_or_default())
+        });
+    Ok(ReviewBranchSnapshot {
+        base_sha,
+        head_sha,
+        commits,
+        title: head
+            .map(|commit| commit.message.clone())
+            .filter(|message| !message.is_empty())
+            .unwrap_or_else(|| branch_name.to_string()),
+    })
+}
+
+fn review_base_from_commits(commits: &[String]) -> Option<String> {
+    let oldest = commits.last()?.as_str();
+    let parent = format!("{oldest}^");
+    resolve_git_ref(&parent).ok()
+}
+
+fn review_ticket_title(branch_name: &str, snapshot: &ReviewBranchSnapshot) -> String {
+    first_non_empty_line(&snapshot.title)
+        .map(str::to_string)
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| format!("Review {branch_name}"))
+}
+
+fn review_ticket_description(branch_name: &str, snapshot: &ReviewBranchSnapshot) -> String {
+    format!(
+        "Review branch `{branch_name}`.\n\nBase: `{}`\nHead: `{}`",
+        short_hash(&snapshot.base_sha),
+        short_hash(&snapshot.head_sha)
+    )
+}
+
+fn create_review_for_ticket(
+    store: &TicketStore,
+    ticket: &Ticket,
+    branch_name: &str,
+    snapshot: &ReviewBranchSnapshot,
+) -> Result<String> {
+    let branch_id = create_review_branch_id(store, branch_name)?;
+    let target = store.session().target(&Target::branch(&branch_id));
+    let ticket_id = ticket.id.to_string();
+    let description = ticket.description.clone().unwrap_or_default();
+    let now = now_rfc3339()?;
+
+    target.set_add("issue:id", &ticket_id)?;
+    target.set("title", ticket.title.as_str())?;
+    target.set("description", description.as_str())?;
+    target.set("status", "open")?;
+    target.set("base:sha", snapshot.base_sha.as_str())?;
+    target.set("head:sha", snapshot.head_sha.as_str())?;
+    target.set("review:created-at", now.as_str())?;
+    target.set("review:created-by", store.email())?;
+    target.set("code:branch", branch_name)?;
+    if let Some(url) = remote_url()? {
+        target.set("code:url", url.as_str())?;
+        if url.starts_with("http://") || url.starts_with("https://") {
+            let code = format!("{url}:{branch_name}");
+            store.set_code(&ticket.id, Some(&code))?;
+        }
+    }
+    refresh_review_revisions_from_commits(store, &branch_id, &snapshot.commits)?;
+
+    let project = store.session().target(&Target::project());
+    project.set(
+        &keys::ticket_field(&ticket.id, "branch-id"),
+        branch_id.as_str(),
+    )?;
+    project.set_add("review:branches", branch_id.as_str())?;
+    Ok(branch_id)
+}
+
+fn create_review_branch_id(store: &TicketStore, branch_name: &str) -> Result<String> {
+    let branch_target = store.session().target(&Target::branch(branch_name));
+    let timestamp = OffsetDateTime::now_utc().unix_timestamp();
+    let branch_id = format!("{branch_name}@{timestamp}");
+    branch_target.set("branch-id", branch_id.as_str())?;
+    Ok(branch_id)
+}
+
+fn refresh_review_revisions_from_commits(
+    store: &TicketStore,
+    branch_id: &str,
+    commits: &[String],
+) -> Result<()> {
+    let target = store.session().target(&Target::branch(branch_id));
+    let previous = target
+        .list_entries("review:revisions")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.value)
+        .collect::<Vec<_>>();
+    target.remove("review:revisions")?;
+    for sha in commits {
+        target.list_push("review:revisions", sha)?;
+    }
+    append_review_revision_changes(store, branch_id, &previous)?;
+    append_review_revision_changes(store, branch_id, commits)?;
+    Ok(())
+}
+
+fn append_review_revision_changes(
+    store: &TicketStore,
+    branch_id: &str,
+    commits: &[String],
+) -> Result<()> {
+    let target = store.session().target(&Target::branch(branch_id));
+    let mut seen = target
+        .list_entries("review:revision-history")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
+        .map(|entry| entry.sha)
+        .collect::<BTreeSet<_>>();
+    for sha in commits.iter().rev() {
+        if seen.insert(sha.clone()) {
+            let entry = ReviewRevisionChange {
+                sha: sha.clone(),
+                change_id: commit_change_id(sha),
+            };
+            target.list_push("review:revision-history", &serde_json::to_string(&entry)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn review_revision_list(base_sha: &str, head_sha: &str) -> Result<Vec<String>> {
+    if base_sha.is_empty() || head_sha.is_empty() {
+        return Ok(Vec::new());
+    }
+    let range = format!("{base_sha}..{head_sha}");
+    let output = Command::new("git")
+        .args(["rev-list", &range])
+        .output()
+        .with_context(|| "running git rev-list")?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+fn review_base_sha(branch_name: &str) -> Result<String> {
+    let base_ref = default_review_base_ref();
+    let output = Command::new("git")
+        .args(["merge-base", &base_ref, branch_name])
+        .output()
+        .with_context(|| format!("running git merge-base {base_ref} {branch_name}"))?;
+    if output.status.success() {
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !sha.is_empty() {
+            return Ok(sha);
+        }
+    }
+    resolve_git_ref(&base_ref).or_else(|_| resolve_git_ref("HEAD"))
+}
+
+fn default_review_base_ref() -> String {
+    for candidate in ["origin/main", "origin/master", "main", "master"] {
+        if resolve_git_ref(candidate).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    "HEAD".into()
+}
+
+fn remote_url() -> Result<Option<String>> {
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .with_context(|| "running git remote get-url origin")?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!url.is_empty()).then_some(url))
+}
+
+fn now_rfc3339() -> Result<String> {
+    Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
+}
+
+fn load_ticket_reviews(
+    store: &TicketStore,
+    tickets: &[Ticket],
+) -> Result<HashMap<uuid::Uuid, TicketReview>> {
+    let project = store.session().target(&Target::project());
+    let mut reviews = HashMap::new();
+
+    for ticket in tickets {
+        if let Some(branch_id) =
+            meta_string(project.get_value(&keys::ticket_field(&ticket.id, "branch-id"))?)
+        {
+            reviews.insert(ticket.id, load_review_metadata(store, &branch_id));
+        } else if let Some(branch_name) = ticket.code.as_deref().and_then(code_branch_name) {
+            reviews.insert(ticket.id, ticket_code_review(branch_name));
+        }
+    }
+
+    for branch_id in meta_set(project.get_value("review:branches")?) {
+        let review = load_review_metadata(store, &branch_id);
+        let target = store.session().target(&Target::branch(&branch_id));
+        for ticket_id in meta_set(target.get_value("issue:id")?) {
+            if let Ok(ticket_id) = uuid::Uuid::parse_str(&ticket_id) {
+                reviews.entry(ticket_id).or_insert_with(|| review.clone());
+            }
+        }
+    }
+
+    Ok(reviews)
+}
+
+fn load_review_metadata(store: &TicketStore, branch_id: &str) -> TicketReview {
+    let target = store.session().target(&Target::branch(branch_id));
+    let branch_name = meta_string(target.get_value("code:branch").ok().flatten());
+    let title = meta_string(target.get_value("title").ok().flatten())
+        .or_else(|| branch_name.clone())
+        .unwrap_or_else(|| branch_id.to_string());
+    let description =
+        meta_string(target.get_value("description").ok().flatten()).unwrap_or_default();
+    let status = meta_string(target.get_value("status").ok().flatten()).unwrap_or_default();
+    let head_sha = meta_string(target.get_value("head:sha").ok().flatten());
+    let revisions: Vec<String> = target
+        .list_entries("review:revisions")
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.value)
+        .collect();
+    let mut revision_changes = target
+        .list_entries("review:revision-history")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
+        .collect::<Vec<_>>();
+    if revision_changes.is_empty() {
+        revision_changes = revisions
+            .iter()
+            .rev()
+            .map(|sha| ReviewRevisionChange {
+                sha: sha.clone(),
+                change_id: None,
+            })
+            .collect();
+    }
+    let messages = target
+        .list_entries("review:messages")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| serde_json::from_str::<ReviewMessageView>(&entry.value).ok())
+        .collect();
+    TicketReview {
+        branch_id: branch_id.to_string(),
+        branch_name,
+        title,
+        description,
+        status,
+        head_sha,
+        revisions,
+        revision_changes,
+        messages,
+    }
+}
+
+fn ticket_code_review(branch_name: &str) -> TicketReview {
+    TicketReview {
+        branch_id: branch_name.to_string(),
+        branch_name: Some(branch_name.to_string()),
+        title: branch_name.to_string(),
+        description: String::new(),
+        status: "open".to_string(),
+        head_sha: resolve_git_ref(branch_name).ok(),
+        revisions: Vec::new(),
+        revision_changes: Vec::new(),
+        messages: Vec::new(),
+    }
+}
+
+fn parse_review_revision_change(value: &str) -> Option<ReviewRevisionChange> {
+    serde_json::from_str::<ReviewRevisionChange>(value)
+        .ok()
+        .or_else(|| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| ReviewRevisionChange {
+                sha: value.to_string(),
+                change_id: None,
+            })
+        })
+}
+
+fn code_branch_name(code: &str) -> Option<&str> {
+    code.rsplit_once(':')
+        .map(|(_, branch)| branch.trim())
+        .filter(|branch| !branch.is_empty())
+}
+
+fn meta_string(value: Option<MetaValue>) -> Option<String> {
+    match value {
+        Some(MetaValue::String(value)) if !value.is_empty() => Some(value),
+        _ => None,
+    }
+}
+
+fn meta_set(value: Option<MetaValue>) -> BTreeSet<String> {
+    match value {
+        Some(MetaValue::Set(values)) => values,
+        Some(MetaValue::String(value)) if !value.is_empty() => BTreeSet::from([value]),
+        _ => BTreeSet::new(),
+    }
+}
+
+fn review_branch_label(review: &TicketReview) -> String {
+    match review.branch_name.as_deref() {
+        Some(name) if name != review.branch_id => format!("{name} ({})", review.branch_id),
+        Some(name) => name.to_string(),
+        None => review.branch_id.clone(),
+    }
+}
+
+fn review_commits(review: &TicketReview) -> Vec<String> {
+    if !review.revisions.is_empty() {
+        return review.revisions.clone();
+    }
+    review.head_sha.iter().cloned().collect()
+}
+
+fn review_status_cache_shas<'a>(
+    reviews: impl IntoIterator<Item = &'a TicketReview>,
+) -> BTreeSet<String> {
+    reviews
+        .into_iter()
+        .flat_map(review_commits)
+        .collect::<BTreeSet<_>>()
+}
+
+fn load_review_status_cache(
+    store: &TicketStore,
+    reviews: &HashMap<uuid::Uuid, TicketReview>,
+) -> HashMap<String, CommitReviewStatus> {
+    review_status_cache_shas(reviews.values())
+        .into_iter()
+        .map(|sha| {
+            let status = commit_review_status(store, &sha);
+            (sha, status)
+        })
+        .collect()
+}
+
+fn commit_review_status(store: &TicketStore, sha: &str) -> CommitReviewStatus {
+    let Ok(target) = Target::commit(sha) else {
+        return CommitReviewStatus::default();
+    };
+    let handle = store.session().target(&target);
+    CommitReviewStatus {
+        reviewed: meta_set(handle.get_value("review:reviewed").ok().flatten()),
+        approvals: meta_set(handle.get_value("review:approvals").ok().flatten()),
+        signed_off: meta_set(handle.get_value("signed-off").ok().flatten()),
+    }
+}
+
+fn resolve_git_ref(reference: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", reference])
+        .output()
+        .with_context(|| format!("running git rev-parse {reference}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git rev-parse {reference} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn short_hash(value: &str) -> &str {
+    value.get(..7).unwrap_or(value)
+}
+
+fn read_review_commit_info_cache_file(path: &Path) -> Option<ReviewCommitInfo> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_review_commit_info_cache_file(path: &Path, info: &ReviewCommitInfo) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec(info) else {
+        return;
+    };
+    let _ = fs::write(path, bytes);
+}
+
+fn review_commit_info(sha: &str) -> ReviewCommitInfo {
+    let output = Command::new("git")
+        .args(["show", "-s", "--format=%s%n%an <%ae>%n%ct%n%B", sha])
+        .output();
+    let mut lines = output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let subject = lines
+        .first()
+        .cloned()
+        .unwrap_or_else(|| short_hash(sha).to_string());
+    let author = lines.get(1).cloned().unwrap_or_default();
+    let updated = lines
+        .get(2)
+        .and_then(|timestamp| timestamp.parse::<i64>().ok())
+        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok())
+        .map(|timestamp| relative_time(timestamp, OffsetDateTime::now_utc()))
+        .unwrap_or_default();
+    let body = if lines.len() > 3 {
+        lines
+            .drain(3..)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    } else {
+        String::new()
+    };
+    ReviewCommitInfo {
+        subject,
+        body,
+        author,
+        updated,
+        shortstat: commit_shortstat(sha),
+        change_id: commit_change_id(sha),
+    }
+}
+
+fn commit_change_id(sha: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["cat-file", "-p", sha])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| line.strip_prefix("change-id ").map(str::to_string))
+}
+
+fn commit_shortstat(sha: &str) -> String {
+    let output = Command::new("git")
+        .args(["show", "--shortstat", "--format=", sha])
+        .output();
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+fn commit_patch_lines(sha: &str) -> Vec<String> {
+    let output = Command::new("git")
+        .args([
+            "show",
+            "--format=",
+            "--patch",
+            "--find-renames",
+            "--color=never",
+            sha,
+        ])
+        .output();
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn review_changed_file_count(oldest: &str, head: &str) -> usize {
+    let base = format!("{oldest}^");
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "--find-renames", &base, head])
+        .output();
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).lines().count())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffFileSpan {
+    key: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffTocEntry {
+    label: String,
+    target_line: usize,
+    depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiffLineLocation {
+    path: String,
+    line: u32,
+}
+
+fn review_messages_for_commit<'a>(
+    review: &'a TicketReview,
+    sha: &str,
+) -> Vec<&'a ReviewMessageView> {
+    review
+        .messages
+        .iter()
+        .filter(|message| message.commit.as_deref() == Some(sha))
+        .collect()
+}
+
+fn review_summary_height(area_height: u16) -> u16 {
+    if area_height >= 11 {
+        8
+    } else {
+        area_height.saturating_sub(2).clamp(0, 5)
+    }
+}
+
+fn review_branch_summary_lines(
+    ticket: &Ticket,
+    review: &TicketReview,
+    commit_data: &[(String, ReviewCommitInfo, CommitReviewStatus)],
+    width: usize,
+) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let infos = commit_data
+        .iter()
+        .map(|(_, info, _)| info.clone())
+        .collect::<Vec<_>>();
+    let authors = review_authors_display(&infos);
+    let updated = infos
+        .first()
+        .map(|info| info.updated.clone())
+        .filter(|updated| !updated.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    let status = if review.status.is_empty() {
+        "open"
+    } else {
+        review.status.as_str()
+    };
+    let progress = review_commit_data_progress_counts(review, commit_data);
+    let version = commit_data.len().max(1);
+    let title = truncate_display(&review.title, width);
+    let branch = truncate_display(&review_branch_label(review), width);
+    let description = review_description(ticket, review);
+
+    vec![
+        Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        review_summary_table_line(
+            [
+                ("Branch", branch, Style::default().fg(Color::LightBlue)),
+                (
+                    "Ticket",
+                    ticket.short_id(),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ],
+            width,
+        ),
+        review_summary_table_line(
+            [
+                ("Status", status.to_string(), review_status_style(status)),
+                (
+                    "Updated",
+                    updated,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ),
+            ],
+            width,
+        ),
+        review_review_progress_line(progress, width),
+        review_summary_table_line(
+            [
+                ("Authors", authors, Style::default().fg(Color::Cyan)),
+                (
+                    "Version",
+                    version.to_string(),
+                    Style::default().fg(Color::Magenta),
+                ),
+                (
+                    "Head",
+                    review
+                        .head_sha
+                        .as_deref()
+                        .map(short_hash)
+                        .unwrap_or("-")
+                        .to_string(),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ],
+            width,
+        ),
+        review_summary_table_line(
+            [("Desc", description, Style::default().fg(Color::Reset))],
+            width,
+        ),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Enter opens selected commit, Esc returns to review summary",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ]
+}
+
+fn review_description(ticket: &Ticket, review: &TicketReview) -> String {
+    first_non_empty_line(&review.description)
+        .or_else(|| ticket.description.as_deref().and_then(first_non_empty_line))
+        .unwrap_or(&ticket.title)
+        .to_string()
+}
+
+fn review_summary_table_line<const N: usize>(
+    fields: [(&str, String, Style); N],
+    width: usize,
+) -> Line<'static> {
+    let field_widths = match N {
+        1 => vec![width],
+        2 => vec![width.saturating_sub(24).max(width / 2), 24.min(width)],
+        3 => {
+            let third = 22.min(width / 3);
+            let second = 22.min(width.saturating_sub(third) / 2);
+            vec![width.saturating_sub(second + third), second, third]
+        }
+        _ => vec![width / N.max(1); N],
+    };
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (idx, (label, value, style)) in fields.into_iter().enumerate() {
+        if idx > 0 {
+            if used + 2 > width {
+                break;
+            }
+            spans.push(Span::raw("  "));
+            used += 2;
+        }
+        let remaining = width.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let field_width = field_widths
+            .get(idx)
+            .copied()
+            .unwrap_or(remaining)
+            .min(remaining);
+        if field_width <= 10 {
+            spans.push(Span::styled(fit_display(&value, field_width), style));
+            used += field_width;
+            continue;
+        }
+        let label_text = format!("{label:<8}: ");
+        let label_width = UnicodeWidthStr::width(label_text.as_str()).min(field_width);
+        spans.push(Span::styled(
+            fit_display(&label_text, label_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+        let value_width = field_width.saturating_sub(label_width);
+        spans.push(Span::styled(fit_display(&value, value_width), style));
+        used += field_width;
+    }
+    Line::from(spans)
+}
+
+fn review_review_progress_line(progress: ReviewProgress, width: usize) -> Line<'static> {
+    let approved = progress_segment(
+        "ap",
+        progress.approved,
+        progress.total,
+        Color::LightGreen,
+        18,
+    );
+    let reviewed = progress_segment(
+        "rv",
+        progress.reviewed,
+        progress.total,
+        Color::LightBlue,
+        18,
+    );
+    let mut spans = approved;
+    spans.push(Span::raw("  "));
+    spans.extend(reviewed);
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    } else if used > width {
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        return Line::from(Span::raw(fit_display(&text, width)));
+    }
+    Line::from(spans)
+}
+
+fn progress_segment(
+    label: &str,
+    count: usize,
+    total: usize,
+    color: Color,
+    bar_width: usize,
+) -> Vec<Span<'static>> {
+    let filled = if total == 0 {
+        0
+    } else {
+        ((count * bar_width) + total - 1) / total
+    }
+    .min(bar_width);
+    vec![
+        Span::styled(
+            format!("{label} "),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{count}/{total} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█".repeat(filled), Style::default().fg(color)),
+        Span::styled(
+            "░".repeat(bar_width.saturating_sub(filled)),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]
+}
+
+#[cfg(test)]
+fn review_commit_meter(count: usize) -> String {
+    let filled = count.min(12);
+    let empty = 12usize.saturating_sub(filled);
+    format!(
+        "{} {}",
+        count,
+        format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+    )
+}
+
+fn review_authors_display(infos: &[ReviewCommitInfo]) -> String {
+    let authors = infos
+        .iter()
+        .map(|info| short_author_display(&info.author))
+        .filter(|author| !author.is_empty())
+        .collect::<BTreeSet<_>>();
+    if authors.is_empty() {
+        return "-".to_string();
+    }
+    truncate_display(&authors.into_iter().collect::<Vec<_>>().join(","), 24)
+}
+
+fn review_commit_table_header(width: usize) -> Line<'static> {
+    let labels = [
+        ("Status", 6),
+        ("Ver.", 5),
+        ("Name", 54),
+        ("Files", 6),
+        ("+/-", 12),
+        ("Updated", 12),
+    ];
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (idx, (label, column_width)) in labels.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+            used += 1;
+        }
+        let remaining = width.saturating_sub(used);
+        if remaining == 0 {
+            break;
+        }
+        let column_width = (*column_width).min(remaining);
+        spans.push(Span::styled(
+            fit_display(label, column_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+        used += column_width;
+    }
+    Line::from(spans)
+}
+
+fn review_commit_table_line(
+    version: usize,
+    sha: &str,
+    review: &TicketReview,
+    info: Option<&ReviewCommitInfo>,
+    status: &CommitReviewStatus,
+    width: usize,
+) -> Line<'static> {
+    let status_label = review_commit_verdict(review, sha, status);
+    let subject = info
+        .map(|info| info.subject.as_str())
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or("metadata not loaded");
+    let updated = info
+        .map(|info| info.updated.as_str())
+        .filter(|updated| !updated.is_empty())
+        .unwrap_or("-");
+    let stats = info
+        .map(|info| review_shortstat_counts(&info.shortstat))
+        .unwrap_or_default();
+    let mut spans = Vec::new();
+    let mut used = 0;
+    push_review_table_column(
+        &mut spans,
+        &mut used,
+        width,
+        &status_label.0,
+        status_label.1,
+        6,
+    );
+    push_review_table_column(
+        &mut spans,
+        &mut used,
+        width,
+        &format!("v{version}"),
+        Style::default().fg(Color::DarkGray),
+        5,
+    );
+    push_review_table_column(
+        &mut spans,
+        &mut used,
+        width,
+        subject,
+        if info.is_some() {
+            Style::default().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+        54,
+    );
+    push_review_table_column(
+        &mut spans,
+        &mut used,
+        width,
+        &stats.files.to_string(),
+        Style::default().fg(Color::Magenta),
+        6,
+    );
+    push_review_changes_column(&mut spans, &mut used, width, &stats, 12);
+    push_review_table_column(
+        &mut spans,
+        &mut used,
+        width,
+        updated,
+        Style::default().fg(Color::DarkGray),
+        12,
+    );
+    Line::from(spans)
+}
+
+fn push_review_table_column(
+    spans: &mut Vec<Span<'static>>,
+    used: &mut usize,
+    width: usize,
+    value: &str,
+    style: Style,
+    column_width: usize,
+) {
+    if !spans.is_empty() {
+        if *used >= width {
+            return;
+        }
+        spans.push(Span::raw(" "));
+        *used += 1;
+    }
+    let remaining = width.saturating_sub(*used);
+    if remaining == 0 {
+        return;
+    }
+    let column_width = column_width.min(remaining);
+    spans.push(Span::styled(fit_display(value, column_width), style));
+    *used += column_width;
+}
+
+fn push_review_changes_column(
+    spans: &mut Vec<Span<'static>>,
+    used: &mut usize,
+    width: usize,
+    stats: &ReviewShortstat,
+    column_width: usize,
+) {
+    if !spans.is_empty() {
+        if *used >= width {
+            return;
+        }
+        spans.push(Span::raw(" "));
+        *used += 1;
+    }
+    let remaining = width.saturating_sub(*used);
+    if remaining == 0 {
+        return;
+    }
+    let column_width = column_width.min(remaining);
+    let change_spans = review_change_spans(stats, column_width);
+    *used += spans_width(&change_spans);
+    spans.extend(change_spans);
+}
+
+fn review_commit_verdict(
+    review: &TicketReview,
+    sha: &str,
+    status: &CommitReviewStatus,
+) -> (String, Style) {
+    let messages = review_messages_for_commit(review, sha);
+    if messages
+        .iter()
+        .rev()
+        .any(|message| message.message_type == "changes-requested")
+    {
+        return (
+            "Ch.Req".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    if !status.approvals.is_empty()
+        || messages
+            .iter()
+            .rev()
+            .any(|message| message.message_type == "approval")
+    {
+        return (
+            "Apprv".to_string(),
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    if !status.reviewed.is_empty() {
+        return ("Revwd".to_string(), Style::default().fg(Color::LightBlue));
+    }
+    ("Pendg".to_string(), Style::default().fg(Color::DarkGray))
+}
+
+#[cfg(test)]
+fn review_changes_display(shortstat: &str) -> String {
+    let stats = review_shortstat_counts(shortstat);
+    if stats.is_empty() {
+        String::new()
+    } else {
+        format!("{} +{} -{}", stats.files, stats.insertions, stats.deletions)
+    }
+}
+
+fn review_change_spans(stats: &ReviewShortstat, width: usize) -> Vec<Span<'static>> {
+    let insertions = format!("+{}", stats.insertions);
+    let deletions = format!("-{}", stats.deletions);
+    if width < 3 {
+        return vec![Span::styled(
+            fit_display(&format!("{insertions} {deletions}"), width),
+            Style::default().fg(Color::LightGreen),
+        )];
+    }
+    let deletion_width = (width / 2).max(2);
+    let insertion_width = width.saturating_sub(deletion_width + 1).max(1);
+    vec![
+        Span::styled(
+            format!(
+                "{:>insertion_width$}",
+                fit_display(&insertions, insertion_width)
+            ),
+            Style::default().fg(Color::LightGreen),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                "{:>deletion_width$}",
+                fit_display(&deletions, deletion_width)
+            ),
+            Style::default().fg(Color::LightRed),
+        ),
+    ]
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReviewShortstat {
+    files: usize,
+    insertions: usize,
+    deletions: usize,
+}
+
+impl ReviewShortstat {
+    #[cfg(test)]
+    fn is_empty(self) -> bool {
+        self.files == 0 && self.insertions == 0 && self.deletions == 0
+    }
+}
+
+fn review_shortstat_counts(shortstat: &str) -> ReviewShortstat {
+    let files = shortstat_number(shortstat, &[" files changed", " file changed"]);
+    let insertions = shortstat_number(shortstat, &[" insertions(+)", " insertion(+)"]);
+    let deletions = shortstat_number(shortstat, &[" deletions(-)", " deletion(-)"]);
+    ReviewShortstat {
+        files,
+        insertions,
+        deletions,
+    }
+}
+
+fn shortstat_number(shortstat: &str, suffixes: &[&str]) -> usize {
+    shortstat
+        .split(',')
+        .find_map(|part| {
+            let part = part.trim();
+            suffixes.iter().find_map(|suffix| part.strip_suffix(suffix))
+        })
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn short_author_display(author: &str) -> String {
+    author
+        .split('<')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_display(value, 13))
+        .unwrap_or_default()
+}
+
+fn review_commit_counts(
+    review: &TicketReview,
+    sha: &str,
+    status: &CommitReviewStatus,
+) -> (usize, usize) {
+    let mut reviewed = status.reviewed.clone();
+    let mut approvals = status.approvals.clone();
+    for message in review_messages_for_commit(review, sha) {
+        match message.message_type.as_str() {
+            "approval" => {
+                reviewed.insert(message.author.clone());
+                approvals.insert(message.author.clone());
+            }
+            "changes-requested" | "comment" => {
+                reviewed.insert(message.author.clone());
+            }
+            _ => {}
+        }
+    }
+    (reviewed.len(), approvals.len())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ReviewProgress {
+    reviewed: usize,
+    approved: usize,
+    total: usize,
+}
+
+fn review_commit_data_progress_counts(
+    review: &TicketReview,
+    commit_data: &[(String, ReviewCommitInfo, CommitReviewStatus)],
+) -> ReviewProgress {
+    let mut progress = ReviewProgress {
+        total: commit_data.len(),
+        ..Default::default()
+    };
+    for (sha, _, status) in commit_data {
+        let (reviewed, approved) = review_commit_counts(review, sha, status);
+        if reviewed > 0 {
+            progress.reviewed += 1;
+        }
+        if approved > 0 {
+            progress.approved += 1;
+        }
+    }
+    progress
+}
+
+#[cfg(test)]
+fn review_commit_versions(
+    commit_data: &[(String, ReviewCommitInfo, CommitReviewStatus)],
+) -> Vec<usize> {
+    let infos = commit_data
+        .iter()
+        .map(|(sha, info, _)| (sha.clone(), info.clone()))
+        .collect::<HashMap<_, _>>();
+    let commits = commit_data
+        .iter()
+        .map(|(sha, _, _)| sha.clone())
+        .collect::<Vec<_>>();
+    review_commit_versions_from_cache(&commits, &[], &infos)
+}
+
+fn review_commit_versions_from_cache(
+    commits: &[String],
+    revision_changes: &[ReviewRevisionChange],
+    infos: &HashMap<String, ReviewCommitInfo>,
+) -> Vec<usize> {
+    if !revision_changes.is_empty() {
+        let mut counts = HashMap::new();
+        let mut versions_by_sha = HashMap::new();
+        for entry in revision_changes {
+            let key = entry
+                .change_id
+                .as_deref()
+                .or_else(|| {
+                    infos
+                        .get(&entry.sha)
+                        .and_then(|info| info.change_id.as_deref())
+                })
+                .unwrap_or(entry.sha.as_str())
+                .to_string();
+            let count = counts.entry(key).or_insert(0usize);
+            *count += 1;
+            versions_by_sha.insert(entry.sha.clone(), *count);
+        }
+        return commits
+            .iter()
+            .map(|sha| {
+                versions_by_sha.get(sha).copied().unwrap_or_else(|| {
+                    let key = infos
+                        .get(sha)
+                        .and_then(|info| info.change_id.as_deref())
+                        .unwrap_or(sha.as_str());
+                    counts.get(key).copied().unwrap_or(1)
+                })
+            })
+            .collect();
+    }
+
+    let mut counts = HashMap::new();
+    let mut versions = vec![1; commits.len()];
+    for (idx, sha) in commits.iter().enumerate().rev() {
+        let key = infos
+            .get(sha)
+            .and_then(|info| info.change_id.as_deref())
+            .unwrap_or(sha.as_str())
+            .to_string();
+        let count = counts.entry(key).or_insert(0usize);
+        *count += 1;
+        versions[idx] = *count;
+    }
+    versions
+}
+
+fn review_commit_status_line(status: &CommitReviewStatus) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{:<10}", "Status"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" : ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(
+                "reviewed {}  approved {}  signed-off {}",
+                status.reviewed.len(),
+                status.approvals.len(),
+                status.signed_off.len()
+            ),
+            Style::default().fg(Color::Cyan),
+        ),
+    ])
+}
+
+fn review_message_line(message: &ReviewMessageView, width: usize) -> Line<'static> {
+    let prefix = format!(
+        "[{}] {}",
+        message.message_type,
+        comment_author_display(&message.author)
+    );
+    let prefix_width = UnicodeWidthStr::width(prefix.as_str()) + 2;
+    let body = truncate_display(
+        &flatten_display(&message.body),
+        width.saturating_sub(prefix_width),
+    );
+    Line::from(vec![
+        Span::styled(prefix, review_message_style(&message.message_type)),
+        Span::raw("  "),
+        Span::raw(body),
+    ])
+}
+
+fn review_message_prompt(
+    message_type: &str,
+    ticket: &Ticket,
+    review: &TicketReview,
+    sha: &str,
+    location: Option<&DiffLineLocation>,
+) -> String {
+    let action = if message_type == "changes-requested" {
+        "Request changes"
+    } else if message_type == "approval" {
+        "Approve"
+    } else {
+        "Review comment"
+    };
+    let mut lines = vec![
+        action.to_string(),
+        format!("Review: {}", review.title),
+        format!("Ticket: {} {}", ticket.short_id(), ticket.title),
+        format!("Commit: {}", short_hash(sha)),
+    ];
+    if let Some(location) = location {
+        lines.push(format!("Line: {}:{}", location.path, location.line));
+    }
+    lines.push("Lines starting with # are ignored.".to_string());
+    lines.join("\n")
+}
+
+fn default_review_message_body(message_type: &str) -> Option<&'static str> {
+    match message_type {
+        "approval" => Some("Approved"),
+        "changes-requested" => Some("Changes requested"),
+        _ => None,
+    }
+}
+
+fn review_message_header_line(message: &ReviewMessageView) -> Line<'static> {
+    let location = match (message.path.as_deref(), message.lines.as_deref()) {
+        (Some(path), Some(lines)) => format!(" {path}:{lines}"),
+        (Some(path), None) => format!(" {path}"),
+        _ => String::new(),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("[{}]", message.message_type),
+            review_message_style(&message.message_type),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            comment_author_display(&message.author),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(location, Style::default().fg(Color::DarkGray)),
+    ])
+}
+
+fn review_message_style(message_type: &str) -> Style {
+    let color = match message_type {
+        "approval" => Color::LightGreen,
+        "changes-requested" => Color::Yellow,
+        "resolved" => Color::DarkGray,
+        _ => Color::LightBlue,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn review_commit_meta_line(
+    ticket: &Ticket,
+    review: &TicketReview,
+    sha: &str,
+    position: usize,
+    total: usize,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            review.title.clone(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(ticket.short_id(), Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(
+            review_branch_label(review),
+            Style::default().fg(Color::LightBlue),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            short_hash(sha).to_string(),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("{position}/{total}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn review_pane_title(title: &str, focused: bool) -> String {
+    if focused {
+        format!("[{title}]")
+    } else {
+        title.to_string()
+    }
+}
+
+#[cfg(test)]
+fn review_commit_diff_lines(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+) -> Vec<Line<'static>> {
+    review_commit_diff_lines_with_spans(info, patch_lines, collapsed_files, None, None).0
+}
+
+fn review_diff_render_cache_key(sha: &str, collapsed_files: &BTreeSet<String>) -> String {
+    let mut key = String::from(sha);
+    for file in collapsed_files {
+        key.push('\0');
+        key.push_str(file);
+    }
+    key
+}
+
+fn review_diff_file_spans(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+) -> Vec<DiffFileSpan> {
+    let mut spans = Vec::new();
+    let mut rendered_line = review_diff_header_height(info);
+    let mut idx = 0;
+    while idx < patch_lines.len() {
+        let Some(file_key) = diff_file_key(&patch_lines[idx]) else {
+            rendered_line += 1;
+            idx += 1;
+            continue;
+        };
+        let next = next_diff_file_index(patch_lines, idx + 1).unwrap_or(patch_lines.len());
+        let start = rendered_line;
+        if collapsed_files.contains(&file_key) {
+            rendered_line += 1;
+        } else {
+            rendered_line += next.saturating_sub(idx);
+        }
+        spans.push(DiffFileSpan {
+            key: file_key,
+            start,
+            end: rendered_line.saturating_sub(1),
+        });
+        idx = next;
+    }
+    spans
+}
+
+fn review_diff_rendered_line_count(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+) -> usize {
+    let mut line_count = review_diff_header_height(info);
+    let mut idx = 0;
+    while idx < patch_lines.len() {
+        let Some(file_key) = diff_file_key(&patch_lines[idx]) else {
+            line_count += 1;
+            idx += 1;
+            continue;
+        };
+        let next = next_diff_file_index(patch_lines, idx + 1).unwrap_or(patch_lines.len());
+        line_count += if collapsed_files.contains(&file_key) {
+            1
+        } else {
+            next.saturating_sub(idx)
+        };
+        idx = next;
+    }
+    line_count
+}
+
+fn review_commit_diff_visible_lines(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+    start_line: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let end_line = start_line.saturating_add(height);
+    let mut rendered_line = 0;
+    push_visible_review_diff_line(
+        &mut lines,
+        &mut rendered_line,
+        start_line,
+        end_line,
+        Line::from(Span::styled(
+            info.subject.clone(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+    );
+    if !info.body.is_empty() {
+        for line in info.body.lines() {
+            push_visible_review_diff_line(
+                &mut lines,
+                &mut rendered_line,
+                start_line,
+                end_line,
+                Line::raw(line.to_string()),
+            );
+        }
+    }
+    push_visible_review_diff_line(
+        &mut lines,
+        &mut rendered_line,
+        start_line,
+        end_line,
+        Line::raw(""),
+    );
+
+    let mut idx = 0;
+    while idx < patch_lines.len() && rendered_line < end_line {
+        let Some(file_key) = diff_file_key(&patch_lines[idx]) else {
+            let line = if rendered_line >= start_line {
+                diff_line_for_file(patch_lines[idx].clone(), None)
+            } else {
+                Line::raw("")
+            };
+            push_visible_review_diff_line(
+                &mut lines,
+                &mut rendered_line,
+                start_line,
+                end_line,
+                line,
+            );
+            idx += 1;
+            continue;
+        };
+
+        let next = next_diff_file_index(patch_lines, idx + 1).unwrap_or(patch_lines.len());
+        if collapsed_files.contains(&file_key) {
+            let line = if rendered_line >= start_line {
+                folded_diff_file_line(&file_key, next.saturating_sub(idx), false)
+            } else {
+                Line::raw("")
+            };
+            push_visible_review_diff_line(
+                &mut lines,
+                &mut rendered_line,
+                start_line,
+                end_line,
+                line,
+            );
+        } else if rendered_line + next.saturating_sub(idx) <= start_line {
+            rendered_line += next.saturating_sub(idx);
+        } else {
+            for line in &patch_lines[idx..next] {
+                if rendered_line >= end_line {
+                    break;
+                }
+                let line = if rendered_line >= start_line {
+                    diff_line_for_file(line.clone(), Some(&file_key))
+                } else {
+                    Line::raw("")
+                };
+                push_visible_review_diff_line(
+                    &mut lines,
+                    &mut rendered_line,
+                    start_line,
+                    end_line,
+                    line,
+                );
+            }
+        }
+        idx = next;
+    }
+    lines
+}
+
+fn push_visible_review_diff_line(
+    lines: &mut Vec<Line<'static>>,
+    rendered_line: &mut usize,
+    start_line: usize,
+    end_line: usize,
+    line: Line<'static>,
+) {
+    if *rendered_line >= start_line && *rendered_line < end_line {
+        lines.push(line);
+    }
+    *rendered_line += 1;
+}
+
+#[cfg(test)]
+fn review_commit_diff_lines_with_spans(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+    selected_file: Option<&str>,
+    selected_line: Option<usize>,
+) -> (Vec<Line<'static>>, Vec<DiffFileSpan>) {
+    let mut lines = Vec::new();
+    let mut spans = Vec::new();
+    push_review_diff_line(
+        &mut lines,
+        Line::from(Span::styled(
+            info.subject.clone(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        selected_line,
+    );
+    if !info.body.is_empty() {
+        for line in info.body.lines() {
+            push_review_diff_line(&mut lines, Line::raw(line.to_string()), selected_line);
+        }
+    }
+    push_review_diff_line(&mut lines, Line::raw(""), selected_line);
+
+    let mut idx = 0;
+    while idx < patch_lines.len() {
+        let Some(file_key) = diff_file_key(&patch_lines[idx]) else {
+            push_review_diff_line(
+                &mut lines,
+                diff_line_for_file(patch_lines[idx].clone(), None),
+                selected_line,
+            );
+            idx += 1;
+            continue;
+        };
+
+        let next = patch_lines
+            .iter()
+            .enumerate()
+            .skip(idx + 1)
+            .find_map(|(line_idx, line)| diff_file_key(line).map(|_| line_idx))
+            .unwrap_or(patch_lines.len());
+        let start = lines.len();
+        if collapsed_files.contains(&file_key) {
+            let hidden = next.saturating_sub(idx);
+            let selected = selected_file == Some(file_key.as_str());
+            lines.push(folded_diff_file_line(&file_key, hidden, selected));
+        } else {
+            for line in &patch_lines[idx..next] {
+                let line = diff_line_for_file(line.clone(), Some(&file_key));
+                push_review_diff_line(&mut lines, line, selected_line);
+            }
+        }
+        spans.push(DiffFileSpan {
+            key: file_key,
+            start,
+            end: lines.len().saturating_sub(1),
+        });
+        idx = next;
+    }
+
+    (lines, spans)
+}
+
+#[cfg(test)]
+fn push_review_diff_line(
+    lines: &mut Vec<Line<'static>>,
+    line: Line<'static>,
+    selected_line: Option<usize>,
+) {
+    let _ = selected_line;
+    lines.push(line);
+}
+
+fn folded_diff_file_line(file_key: &str, hidden: usize, selected: bool) -> Line<'static> {
+    let _ = selected;
+    Line::from(vec![
+        Span::styled(
+            "[+] ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            file_key.to_string(),
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  {hidden} lines folded"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
+}
+
+fn add_diff_gutter(
+    lines: Vec<Line<'static>>,
+    total: usize,
+    scroll: usize,
+    page_height: usize,
+    selected_line: Option<usize>,
+) -> Vec<Line<'static>> {
+    if total == 0 {
+        return Vec::new();
+    }
+    let page_height = page_height.max(1);
+    let thumb_height = if total <= page_height {
+        page_height
+    } else {
+        ((page_height * page_height) / total).clamp(1, page_height)
+    };
+    let thumb_start = if total <= page_height || page_height <= thumb_height {
+        0
+    } else {
+        let max_scroll = total.saturating_sub(page_height).max(1);
+        let max_thumb_start = page_height - thumb_height;
+        scroll.min(max_scroll) * max_thumb_start / max_scroll
+    };
+
+    lines
+        .into_iter()
+        .enumerate()
+        .take(page_height)
+        .map(|(row, mut line)| {
+            let idx = scroll.saturating_add(row);
+            let in_view = row < page_height;
+            let in_thumb = in_view && row >= thumb_start && row < thumb_start + thumb_height;
+            let selected = selected_line == Some(idx);
+            let gutter = if selected {
+                "▶ "
+            } else if in_thumb {
+                "█ "
+            } else {
+                "│ "
+            };
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Rgb(210, 170, 40))
+                    .add_modifier(Modifier::BOLD)
+            } else if in_thumb {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            line.spans.insert(0, Span::styled(gutter, style));
+            line
+        })
+        .collect()
+}
+
+fn diff_file_keys(patch_lines: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut files = Vec::new();
+    for line in patch_lines {
+        if let Some(key) = diff_file_key(line) {
+            if seen.insert(key.clone()) {
+                files.push(key);
+            }
+        }
+    }
+    files
+}
+
+fn diff_file_key(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("diff --git ")?;
+    let mut parts = rest.split_whitespace();
+    let _old = parts.next()?;
+    let new = parts.next()?;
+    Some(
+        new.strip_prefix("b/")
+            .unwrap_or(new)
+            .trim_matches('"')
+            .to_string(),
+    )
+}
+
+fn diff_file_at_scroll(spans: &[DiffFileSpan], scroll: usize) -> Option<String> {
+    spans
+        .iter()
+        .find(|span| span.start <= scroll && scroll <= span.end)
+        .or_else(|| spans.iter().rev().find(|span| span.start <= scroll))
+        .or_else(|| spans.first())
+        .map(|span| span.key.clone())
+}
+
+fn review_diff_toc_entries(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+) -> Vec<DiffTocEntry> {
+    let mut entries = Vec::new();
+    let mut rendered_line = review_diff_header_height(info);
+    let mut idx = 0;
+    while idx < patch_lines.len() {
+        let Some(file_key) = diff_file_key(&patch_lines[idx]) else {
+            rendered_line += 1;
+            idx += 1;
+            continue;
+        };
+        let next = next_diff_file_index(patch_lines, idx + 1).unwrap_or(patch_lines.len());
+        entries.push(DiffTocEntry {
+            label: file_key.clone(),
+            target_line: rendered_line,
+            depth: 0,
+        });
+        if collapsed_files.contains(&file_key) {
+            rendered_line += 1;
+            idx = next;
+            continue;
+        }
+        for line in &patch_lines[idx..next] {
+            if line.starts_with("@@") {
+                entries.push(DiffTocEntry {
+                    label: hunk_toc_label(line),
+                    target_line: rendered_line,
+                    depth: 1,
+                });
+            }
+            rendered_line += 1;
+        }
+        idx = next;
+    }
+    entries
+}
+
+fn review_diff_location_at_line(
+    info: &ReviewCommitInfo,
+    patch_lines: &[String],
+    collapsed_files: &BTreeSet<String>,
+    target_line: usize,
+) -> Option<DiffLineLocation> {
+    let mut rendered_line = review_diff_header_height(info);
+    let mut idx = 0;
+    while idx < patch_lines.len() {
+        let Some(file_key) = diff_file_key(&patch_lines[idx]) else {
+            rendered_line += 1;
+            idx += 1;
+            continue;
+        };
+        let next = next_diff_file_index(patch_lines, idx + 1).unwrap_or(patch_lines.len());
+        if collapsed_files.contains(&file_key) {
+            rendered_line += 1;
+            idx = next;
+            continue;
+        }
+        let mut old_line = 0u32;
+        let mut new_line = 0u32;
+        for line in &patch_lines[idx..next] {
+            if let Some((old_start, new_start)) = parse_hunk_starts(line) {
+                old_line = old_start;
+                new_line = new_start;
+                rendered_line += 1;
+                continue;
+            }
+            let location = if line.starts_with('+') && !line.starts_with("+++") {
+                let location = DiffLineLocation {
+                    path: file_key.clone(),
+                    line: new_line,
+                };
+                new_line = new_line.saturating_add(1);
+                Some(location)
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                let location = DiffLineLocation {
+                    path: file_key.clone(),
+                    line: old_line,
+                };
+                old_line = old_line.saturating_add(1);
+                Some(location)
+            } else if line.starts_with(' ') {
+                let location = DiffLineLocation {
+                    path: file_key.clone(),
+                    line: new_line,
+                };
+                old_line = old_line.saturating_add(1);
+                new_line = new_line.saturating_add(1);
+                Some(location)
+            } else {
+                None
+            };
+            if rendered_line == target_line {
+                return location;
+            }
+            rendered_line += 1;
+        }
+        idx = next;
+    }
+    None
+}
+
+fn review_diff_header_height(info: &ReviewCommitInfo) -> usize {
+    1 + info.body.lines().count() + 1
+}
+
+fn next_diff_file_index(patch_lines: &[String], start: usize) -> Option<usize> {
+    patch_lines
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(line_idx, line)| diff_file_key(line).map(|_| line_idx))
+}
+
+fn hunk_toc_label(line: &str) -> String {
+    line.split("@@")
+        .nth(2)
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(|label| format!("@@ {label}"))
+        .unwrap_or_else(|| line.to_string())
+}
+
+fn parse_hunk_starts(line: &str) -> Option<(u32, u32)> {
+    if !line.starts_with("@@") {
+        return None;
+    }
+    let mut parts = line.split_whitespace();
+    parts.next()?;
+    let old_part = parts.next()?;
+    let new_part = parts.next()?;
+    let old_start = old_part
+        .trim_start_matches('-')
+        .split(',')
+        .next()?
+        .parse()
+        .ok()?;
+    let new_start = new_part
+        .trim_start_matches('+')
+        .split(',')
+        .next()?
+        .parse()
+        .ok()?;
+    Some((old_start, new_start))
+}
+
+fn diff_line_for_file(line: String, file_key: Option<&str>) -> Line<'static> {
+    let style = if line.starts_with("@@") {
+        Style::default().fg(Color::LightBlue)
+    } else if line.starts_with("diff --git") || line.starts_with("index ") {
+        Style::default().fg(Color::DarkGray)
+    } else if line.starts_with("--- ") || line.starts_with("+++ ") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    if line.starts_with("diff --git")
+        || line.starts_with("index ")
+        || line.starts_with("@@")
+        || line.starts_with("--- ")
+        || line.starts_with("+++ ")
+    {
+        return Line::from(Span::styled(line, style));
+    }
+
+    let (prefix, code, prefix_style, line_style) = if let Some(rest) = line.strip_prefix('+') {
+        (
+            "+",
+            rest,
+            Style::default().fg(Color::LightGreen),
+            Style::default().bg(Color::Rgb(12, 42, 28)),
+        )
+    } else if let Some(rest) = line.strip_prefix('-') {
+        (
+            "-",
+            rest,
+            Style::default().fg(Color::LightRed),
+            Style::default().bg(Color::Rgb(52, 20, 24)),
+        )
+    } else {
+        ("", line.as_str(), Style::default(), Style::default())
+    };
+    let mut spans = Vec::new();
+    if !prefix.is_empty() {
+        spans.push(Span::styled(
+            prefix.to_string(),
+            prefix_style.add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend(syntax_highlight_code(code, file_key));
+    Line::from(spans).style(line_style)
+}
+
+fn syntax_highlight_code(code: &str, file_key: Option<&str>) -> Vec<Span<'static>> {
+    let assets = syntax_assets();
+    let syntax = file_key
+        .and_then(|file| assets.syntax_set.find_syntax_for_file(file).ok().flatten())
+        .unwrap_or_else(|| assets.syntax_set.find_syntax_plain_text());
+    let mut highlighter = HighlightLines::new(syntax, &assets.theme);
+    match highlighter.highlight_line(code, &assets.syntax_set) {
+        Ok(regions) => regions
+            .into_iter()
+            .map(|(style, text)| Span::styled(text.to_string(), syntect_style(style)))
+            .collect(),
+        Err(_) => vec![Span::raw(code.to_string())],
+    }
+}
+
+struct SyntaxAssets {
+    syntax_set: SyntaxSet,
+    theme: syntect::highlighting::Theme,
+}
+
+fn syntax_assets() -> &'static SyntaxAssets {
+    static ASSETS: OnceLock<SyntaxAssets> = OnceLock::new();
+    ASSETS.get_or_init(|| {
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
+        let theme = theme_set
+            .themes
+            .get("base16-ocean.dark")
+            .or_else(|| theme_set.themes.values().next())
+            .cloned()
+            .unwrap_or_default();
+        SyntaxAssets { syntax_set, theme }
+    })
+}
+
+fn syntect_style(style: SyntectStyle) -> Style {
+    let mut tui_style = Style::default().fg(Color::Rgb(
+        style.foreground.r,
+        style.foreground.g,
+        style.foreground.b,
+    ));
+    if style
+        .font_style
+        .contains(syntect::highlighting::FontStyle::BOLD)
+    {
+        tui_style = tui_style.add_modifier(Modifier::BOLD);
+    }
+    if style
+        .font_style
+        .contains(syntect::highlighting::FontStyle::ITALIC)
+    {
+        tui_style = tui_style.add_modifier(Modifier::ITALIC);
+    }
+    tui_style
 }
 
 fn ticket_list_line(
@@ -5938,6 +10630,349 @@ fn ticket_list_line(
         width,
         has_writeups.then(|| ("[w]".to_string(), Style::default().fg(Color::Yellow))),
     )
+}
+
+fn review_ticket_lines(
+    ticket: &Ticket,
+    review: Option<&TicketReview>,
+    updated: &str,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let short_id = ticket
+        .short_id()
+        .chars()
+        .take(LIST_ID_WIDTH)
+        .collect::<String>();
+    let title = review
+        .map(|review| review.title.as_str())
+        .filter(|title| !title.is_empty())
+        .unwrap_or(&ticket.title);
+    let status = review
+        .map(|review| review_status_abbrev(&review.status))
+        .unwrap_or("OP");
+    let status_style = review
+        .map(|review| review_status_style(&review.status))
+        .unwrap_or_else(|| review_status_style("open"));
+    let commits = review.map(review_commits).unwrap_or_default();
+    let branch = review
+        .and_then(|review| review.branch_name.as_deref())
+        .or_else(|| review.map(|review| review.branch_id.as_str()))
+        .unwrap_or("-");
+    let branch_width = width / 4;
+    let fixed_width = LIST_ID_WIDTH + 1 + 2 + 1 + 4 + 1 + 4 + 1 + branch_width + 1;
+    let title_width = width.saturating_sub(fixed_width).max(1);
+    let mut spans = vec![
+        Span::styled(
+            fit_display(&short_id, LIST_ID_WIDTH),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(format!("{status:>2}"), status_style),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>4}", fit_display(updated, 4)),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>3}c", commits.len()),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(branch, branch_width),
+            Style::default().fg(Color::LightBlue),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(title, title_width),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    vec![Line::from(spans)]
+}
+
+fn review_table_header(width: usize) -> Line<'static> {
+    let branch_width = width / 4;
+    let fixed_width = LIST_ID_WIDTH + 1 + 2 + 1 + 4 + 1 + 4 + 1 + branch_width + 1;
+    let title_width = width.saturating_sub(fixed_width).max(1);
+    table_header_line(
+        &[
+            ("Id", LIST_ID_WIDTH),
+            ("St", 2),
+            ("Dt", 4),
+            ("C", 4),
+            ("Branch", branch_width),
+            ("Title", title_width),
+        ],
+        width,
+    )
+}
+
+fn review_branch_choice_line(choice: &ReviewBranchChoice, width: usize) -> Line<'static> {
+    let updated = choice
+        .last_commit_at
+        .map(|at| relative_time(at, OffsetDateTime::now_utc()))
+        .unwrap_or_else(|| "-".to_string());
+    let ahead = choice
+        .commits_ahead
+        .map(|ahead| format!("{ahead} ahead"))
+        .unwrap_or_else(|| "-".to_string());
+    let date_width = 4;
+    let ahead_width = 8;
+    let author_width = 18.min(width / 4);
+    let fixed_width = date_width + 1 + ahead_width + 1 + author_width + 1;
+    let branch_width = width.saturating_sub(fixed_width).max(1);
+    let mut spans = vec![
+        Span::styled(
+            fit_display(&updated, date_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(&ahead, ahead_width),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(&choice.author, author_width),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(&choice.name, branch_width),
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    Line::from(spans)
+}
+
+#[cfg(test)]
+fn review_commit_line(
+    version: usize,
+    sha: &str,
+    _review: &TicketReview,
+    info: &ReviewCommitInfo,
+    _status: &CommitReviewStatus,
+    width: usize,
+) -> Line<'static> {
+    let hash_width = 7;
+    let version_width = 4;
+    let updated_width = 4;
+    let files_width = 4;
+    let changes_width = 11;
+    let separator_count = 5;
+    let fixed_width =
+        hash_width + version_width + updated_width + files_width + changes_width + separator_count;
+    let subject_width = width.saturating_sub(fixed_width).max(1);
+    let version = format!("v{version}");
+    let updated = if info.updated.is_empty() {
+        "unknown".to_string()
+    } else {
+        info.updated.clone()
+    };
+    let stats = review_shortstat_counts(&info.shortstat);
+    let mut spans = vec![
+        Span::styled(
+            short_hash(sha).to_string(),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{version:>version_width$}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(" "),
+        Span::raw(fit_display(&info.subject, subject_width)),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>updated_width$}", fit_display(&updated, updated_width)),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>files_width$}", stats.files),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw(" "),
+    ];
+    spans.extend(review_change_spans(&stats, changes_width));
+    Line::from(spans)
+}
+
+fn review_commit_summary_header(width: usize) -> Line<'static> {
+    let hash_width = 7;
+    let version_width = 4;
+    let updated_width = 4;
+    let files_width = 4;
+    let changes_width = 11;
+    let separator_count = 5;
+    let fixed_width =
+        hash_width + version_width + updated_width + files_width + changes_width + separator_count;
+    let subject_width = width.saturating_sub(fixed_width).max(1);
+    let mut spans = vec![
+        Span::styled(
+            fit_display("Commit", hash_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display("Ver", version_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display("Title", subject_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>updated_width$}", "Dt"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>files_width$}", "F"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display("+/-", changes_width),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let used = spans_width(&spans);
+    if used < width {
+        spans.push(Span::raw(" ".repeat(width - used)));
+    }
+    Line::from(spans)
+}
+
+fn review_commit_summary_line(
+    position: usize,
+    sha: &str,
+    info: Option<&ReviewCommitInfo>,
+    _status: Option<&CommitReviewStatus>,
+    width: usize,
+) -> Line<'static> {
+    let hash_width = 7;
+    let version_width = 4;
+    let updated_width = 4;
+    let files_width = 4;
+    let changes_width = 11;
+    let separator_count = 5;
+    let fixed_width =
+        hash_width + version_width + updated_width + files_width + changes_width + separator_count;
+    let subject_width = width.saturating_sub(fixed_width).max(1);
+    let version = format!("v{position}");
+    let subject = info
+        .map(|info| info.subject.as_str())
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or("metadata not loaded");
+    let updated = info
+        .map(|info| info.updated.as_str())
+        .filter(|updated| !updated.is_empty())
+        .unwrap_or("-");
+    let stats = info
+        .map(|info| review_shortstat_counts(&info.shortstat))
+        .unwrap_or_default();
+    let mut spans = vec![
+        Span::styled(
+            short_hash(sha).to_string(),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{version:>version_width$}"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(subject, subject_width),
+            if info.is_some() {
+                Style::default()
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>updated_width$}", fit_display(updated, updated_width)),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>files_width$}", stats.files),
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::raw(" "),
+    ];
+    spans.extend(review_change_spans(&stats, changes_width));
+    Line::from(spans)
+}
+
+fn review_status_style(status: &str) -> Style {
+    let color = match status {
+        "approved" | "merged" => Color::LightGreen,
+        "changes-requested" => Color::LightRed,
+        "closed" => Color::DarkGray,
+        _ => Color::LightBlue,
+    };
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn review_status_abbrev(status: &str) -> &'static str {
+    match status {
+        "changes-requested" => "CR",
+        "approved" => "AP",
+        "merged" => "MG",
+        "closed" => "CL",
+        "new" => "NW",
+        "open" | "" => "OP",
+        _ => "??",
+    }
+}
+
+fn review_is_open(ticket: &Ticket, review: &TicketReview) -> bool {
+    ticket.status == TicketStatus::Open && !matches!(review.status.as_str(), "closed" | "merged")
+}
+
+fn review_matches(review: &TicketReview, needle: &str) -> bool {
+    review.title.to_ascii_lowercase().contains(needle)
+        || review.description.to_ascii_lowercase().contains(needle)
+        || review.branch_id.to_ascii_lowercase().contains(needle)
+        || review
+            .branch_name
+            .as_deref()
+            .is_some_and(|branch| branch.to_ascii_lowercase().contains(needle))
 }
 
 fn issue_title_prefix(
@@ -6182,25 +11217,12 @@ fn issue_column_widths(columns: &[IssueColumn], width: usize) -> Vec<usize> {
 }
 
 fn issue_table_header(columns: &[IssueColumn], widths: &[usize], width: usize) -> Line<'static> {
-    let mut spans = vec![Span::raw(
-        " ".repeat(UnicodeWidthStr::width(HIGHLIGHT_SYMBOL)),
-    )];
-    for (idx, (column, column_width)) in columns.iter().zip(widths).enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            fit_display(column.label(), *column_width),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    let used = spans_width(&spans);
-    if used < width {
-        spans.push(Span::raw(" ".repeat(width - used)));
-    }
-    Line::from(spans)
+    let columns = columns
+        .iter()
+        .zip(widths)
+        .map(|(column, width)| (column.label(), *width))
+        .collect::<Vec<_>>();
+    table_header_line(&columns, width)
 }
 
 fn ticket_table_line(
@@ -6452,6 +11474,28 @@ fn writeup_list_line(writeup: &Writeup, width: usize, compact: bool) -> Line<'st
         width,
         issue_indicator,
     )
+}
+
+fn writeup_table_header(width: usize, compact: bool) -> Line<'static> {
+    let meta = vec![
+        ("Dt", LIST_AGE_WIDTH),
+        ("P", LIST_PRIORITY_WIDTH),
+        ("V", LIST_STATE_WIDTH),
+        ("St", LIST_STATE_WIDTH),
+    ];
+    let fixed =
+        LIST_ID_WIDTH + 2 + meta.iter().map(|(_, width)| *width).sum::<usize>() + meta.len();
+    let title_width = width.saturating_sub(fixed).max(1);
+    let mut columns = vec![("Id", LIST_ID_WIDTH)];
+    columns.extend(meta);
+    columns.push(("Title", title_width));
+    let used = UnicodeWidthStr::width(HIGHLIGHT_SYMBOL)
+        + columns.iter().map(|(_, width)| *width).sum::<usize>()
+        + columns.len().saturating_sub(1);
+    if !compact && used + 4 < width {
+        columns.push(("Tags", width - used - 1));
+    }
+    table_header_line(&columns, width)
 }
 
 struct DashboardStats {
@@ -7138,6 +12182,15 @@ fn writeup_edit_body(writeup: &Writeup) -> String {
     if let Some(latest_body) = writeup.latest_body() {
         body.push_str("\n\n");
         body.push_str(latest_body);
+    }
+    body
+}
+
+fn review_edit_body(review: &TicketReview) -> String {
+    let mut body = review.title.clone();
+    if !review.description.trim().is_empty() {
+        body.push_str("\n\n");
+        body.push_str(&review.description);
     }
     body
 }
@@ -8205,6 +13258,549 @@ mod tests {
     }
 
     #[test]
+    fn tabs_title_includes_reviews_tab() {
+        let title = tabs_title(TuiTab::Reviews, "Open reviews");
+        assert!(title.contains(" issues "));
+        assert!(title.contains(" writeups "));
+        assert!(title.contains("[reviews]"));
+        assert!(title.contains("Open reviews"));
+    }
+
+    #[test]
+    fn review_table_header_matches_review_row_fields() {
+        let text = review_table_header(80)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Id"));
+        assert!(text.contains("St"));
+        assert!(text.contains("Dt"));
+        assert!(text.contains("C"));
+        assert!(text.contains("Branch"));
+        assert!(text.contains("Title"));
+    }
+
+    #[test]
+    fn review_open_filter_uses_ticket_and_review_status() {
+        let mut ticket = test_ticket(uuid::Uuid::from_u128(1), None, &[]);
+        let mut review = TicketReview {
+            status: "open".to_string(),
+            ..Default::default()
+        };
+
+        assert!(review_is_open(&ticket, &review));
+        review.status = "closed".to_string();
+        assert!(!review_is_open(&ticket, &review));
+        review.status = "merged".to_string();
+        assert!(!review_is_open(&ticket, &review));
+        review.status = "open".to_string();
+        ticket.status = TicketStatus::Closed;
+        assert!(!review_is_open(&ticket, &review));
+    }
+
+    #[test]
+    fn review_commit_line_marks_counts_and_changes() {
+        let review = TicketReview {
+            messages: vec![ReviewMessageView {
+                author: "approver@example.com".to_string(),
+                body: "approved".to_string(),
+                message_type: "approval".to_string(),
+                commit: Some("abcdef123456".to_string()),
+                path: None,
+                lines: None,
+            }],
+            ..Default::default()
+        };
+        let status = CommitReviewStatus {
+            reviewed: BTreeSet::from(["reviewer@example.com".to_string()]),
+            approvals: BTreeSet::new(),
+            signed_off: BTreeSet::from(["signer@example.com".to_string()]),
+        };
+        let info = ReviewCommitInfo {
+            subject: "Add parser checks".to_string(),
+            updated: "7m".to_string(),
+            shortstat: "3 files changed, 102 insertions(+), 2 deletions(-)".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let line = review_commit_line(3, "abcdef123456", &review, &info, &status, 100);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("abcdef1"));
+        assert!(text.contains("  v3"));
+        assert!(text.contains("Add parser checks"));
+        assert!(text.contains("7m"));
+        assert!(text.contains("  3"));
+        assert!(text.contains("+102"));
+        assert!(text.contains("-2"));
+        assert!(!text.contains("rv:"));
+        assert!(!text.contains("ap:"));
+        assert!(!text.contains("so:"));
+        assert!(line
+            .spans
+            .iter()
+            .any(|span| span.content.trim() == "3" && span.style.fg == Some(Color::Magenta)));
+        assert!(line
+            .spans
+            .iter()
+            .any(|span| span.content.trim() == "-2" && span.style.fg == Some(Color::LightRed)));
+    }
+
+    #[test]
+    fn review_commit_verdict_uses_short_labels() {
+        let review = TicketReview {
+            messages: vec![ReviewMessageView {
+                author: "reviewer@example.com".to_string(),
+                body: "please adjust".to_string(),
+                message_type: "changes-requested".to_string(),
+                commit: Some("abcdef123456".to_string()),
+                path: None,
+                lines: None,
+            }],
+            ..Default::default()
+        };
+        let status = CommitReviewStatus::default();
+        assert_eq!(
+            review_commit_verdict(&review, "abcdef123456", &status).0,
+            "Ch.Req"
+        );
+
+        let review = TicketReview::default();
+        let status = CommitReviewStatus {
+            approvals: BTreeSet::from(["approver@example.com".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            review_commit_verdict(&review, "abcdef123456", &status).0,
+            "Apprv"
+        );
+        assert_eq!(
+            review_commit_verdict(
+                &TicketReview::default(),
+                "abcdef123456",
+                &CommitReviewStatus::default()
+            )
+            .0,
+            "Pendg"
+        );
+    }
+
+    #[test]
+    fn review_commit_summary_header_labels_review_count_columns() {
+        let header = review_commit_summary_header(78);
+        let text = header
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(!text.contains("rv"));
+        assert!(!text.contains("ap"));
+        assert!(text.contains("Commit"));
+        assert!(text.contains("+/-"));
+        assert!(spans_width(&header.spans) <= 78);
+    }
+
+    #[test]
+    fn review_progress_line_summarizes_review_counts() {
+        let line = review_review_progress_line(
+            ReviewProgress {
+                reviewed: 5,
+                approved: 3,
+                total: 20,
+            },
+            78,
+        );
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(spans_width(&line.spans) <= 78);
+        assert!(text.contains("rv 5/20"));
+        assert!(text.contains("ap 3/20"));
+        assert!(text.contains("█"));
+    }
+
+    #[test]
+    fn review_commit_versions_count_change_id_history() {
+        let commit_data = vec![
+            (
+                "new-a".to_string(),
+                ReviewCommitInfo {
+                    change_id: Some("change-a".to_string()),
+                    ..ReviewCommitInfo::default()
+                },
+                CommitReviewStatus::default(),
+            ),
+            (
+                "only-b".to_string(),
+                ReviewCommitInfo {
+                    change_id: Some("change-b".to_string()),
+                    ..ReviewCommitInfo::default()
+                },
+                CommitReviewStatus::default(),
+            ),
+            (
+                "old-a".to_string(),
+                ReviewCommitInfo {
+                    change_id: Some("change-a".to_string()),
+                    ..ReviewCommitInfo::default()
+                },
+                CommitReviewStatus::default(),
+            ),
+        ];
+
+        assert_eq!(review_commit_versions(&commit_data), vec![2, 1, 1]);
+    }
+
+    #[test]
+    fn review_commit_versions_use_revision_change_history() {
+        let commits = vec!["new-a".to_string(), "only-b".to_string()];
+        let revision_changes = vec![
+            ReviewRevisionChange {
+                sha: "old-a".to_string(),
+                change_id: Some("change-a".to_string()),
+            },
+            ReviewRevisionChange {
+                sha: "old-b".to_string(),
+                change_id: Some("change-b".to_string()),
+            },
+            ReviewRevisionChange {
+                sha: "new-a".to_string(),
+                change_id: Some("change-a".to_string()),
+            },
+            ReviewRevisionChange {
+                sha: "only-b".to_string(),
+                change_id: Some("change-b".to_string()),
+            },
+        ];
+        let infos = HashMap::new();
+
+        assert_eq!(
+            review_commit_versions_from_cache(&commits, &revision_changes, &infos),
+            vec![2, 2]
+        );
+    }
+
+    #[test]
+    fn review_commits_fall_back_to_current_head() {
+        let review = TicketReview {
+            head_sha: Some("abcdef123456".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(review_commits(&review), vec!["abcdef123456".to_string()]);
+
+        let review = TicketReview {
+            head_sha: Some("abcdef123456".to_string()),
+            revisions: vec!["1111111".to_string(), "2222222".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(
+            review_commits(&review),
+            vec!["1111111".to_string(), "2222222".to_string()]
+        );
+    }
+
+    #[test]
+    fn review_status_cache_shas_include_revisions_and_heads() {
+        let reviews = [
+            TicketReview {
+                head_sha: Some("head-ignored".to_string()),
+                revisions: vec!["new".to_string(), "old".to_string()],
+                ..Default::default()
+            },
+            TicketReview {
+                head_sha: Some("head".to_string()),
+                ..Default::default()
+            },
+            TicketReview {
+                revisions: vec!["old".to_string()],
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            review_status_cache_shas(reviews.iter()),
+            BTreeSet::from(["head".to_string(), "new".to_string(), "old".to_string()])
+        );
+    }
+
+    #[test]
+    fn review_messages_filter_by_commit() {
+        let review = TicketReview {
+            messages: vec![
+                ReviewMessageView {
+                    author: "alice@example.com".to_string(),
+                    body: "check this".to_string(),
+                    message_type: "comment".to_string(),
+                    commit: Some("abc123".to_string()),
+                    path: Some("src/lib.rs".to_string()),
+                    lines: Some("42".to_string()),
+                },
+                ReviewMessageView {
+                    author: "bob@example.com".to_string(),
+                    body: "other".to_string(),
+                    message_type: "comment".to_string(),
+                    commit: Some("def456".to_string()),
+                    path: None,
+                    lines: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let messages = review_messages_for_commit(&review, "abc123");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].author, "alice@example.com");
+    }
+
+    #[test]
+    fn review_changes_display_extracts_insertions_and_deletions() {
+        assert_eq!(
+            review_changes_display("3 files changed, 102 insertions(+), 2 deletions(-)"),
+            "3 +102 -2"
+        );
+        assert_eq!(
+            review_changes_display("1 file changed, 7 insertions(+)"),
+            "1 +7 -0"
+        );
+    }
+
+    #[test]
+    fn review_commit_meter_caps_visual_width() {
+        assert_eq!(review_commit_meter(3), "3 ███░░░░░░░░░");
+        assert_eq!(review_commit_meter(15), "15 ████████████");
+    }
+
+    #[test]
+    fn review_branch_summary_includes_core_metadata() {
+        let ticket = test_ticket(uuid::Uuid::from_u128(1), None, &[]);
+        let review = TicketReview {
+            branch_id: "review-cli@123".to_string(),
+            branch_name: Some("review-cli".to_string()),
+            title: "Review CLI".to_string(),
+            description: "Review branch description".to_string(),
+            status: "open".to_string(),
+            head_sha: Some("abcdef123456".to_string()),
+            revisions: vec!["abcdef123456".to_string()],
+            revision_changes: Vec::new(),
+            messages: Vec::new(),
+        };
+        let commit_data = vec![(
+            "abcdef123456".to_string(),
+            ReviewCommitInfo {
+                subject: "Add review CLI".to_string(),
+                author: "Test User <test@example.com>".to_string(),
+                updated: "1 hour ago".to_string(),
+                ..ReviewCommitInfo::default()
+            },
+            CommitReviewStatus::default(),
+        )];
+
+        let text = review_branch_summary_lines(&ticket, &review, &commit_data, 120)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Review CLI"));
+        assert!(text.contains("Branch  : review-cli (review-cli@123)"));
+        assert!(text.contains("Ticket  : 000"));
+        assert!(text.contains("Status  : open"));
+        assert!(text.contains("Head    : abcdef1"));
+        assert!(text.contains("Desc    : Review branch description"));
+    }
+
+    #[test]
+    fn review_diff_file_keys_keep_patch_order() {
+        let patch = vec![
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "diff --git a/src/b.rs b/src/b.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+        ];
+
+        assert_eq!(
+            diff_file_keys(&patch),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn review_diff_lines_can_fold_individual_files() {
+        let info = ReviewCommitInfo {
+            subject: "Update files".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let patch = vec![
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+            "index 111..222 100644".to_string(),
+            "--- a/src/a.rs".to_string(),
+            "+++ b/src/a.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "-old".to_string(),
+            "+new".to_string(),
+            "diff --git a/src/b.rs b/src/b.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "+other".to_string(),
+        ];
+        let collapsed = BTreeSet::from(["src/a.rs".to_string()]);
+        let text = review_commit_diff_lines(&info, &patch, &collapsed)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("[+] \nsrc/a.rs\n  7 lines folded"));
+        assert!(!text.contains("index 111..222"));
+        assert!(!text.contains("-old"));
+        assert!(text.contains("other"));
+    }
+
+    #[test]
+    fn review_diff_visible_lines_only_returns_requested_window() {
+        let info = ReviewCommitInfo {
+            subject: "Update files".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let patch = vec![
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "-old".to_string(),
+            "+new".to_string(),
+            "diff --git a/src/b.rs b/src/b.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "+other".to_string(),
+        ];
+
+        let lines = review_commit_diff_visible_lines(&info, &patch, &BTreeSet::new(), 3, 2);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 2);
+        assert!(text.contains("@@ -1 +1 @@"));
+        assert!(text.contains("old"));
+        assert!(!text.contains("new"));
+    }
+
+    #[test]
+    fn review_diff_lines_do_not_highlight_selected_content_line() {
+        let info = ReviewCommitInfo {
+            subject: "Update files".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let patch = vec![
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+            "@@ -1 +1 @@".to_string(),
+            "+new".to_string(),
+        ];
+        let lines =
+            review_commit_diff_lines_with_spans(&info, &patch, &BTreeSet::new(), None, Some(3)).0;
+
+        assert_eq!(lines[3].spans[0].content.as_ref(), "@@ -1 +1 @@");
+        assert_eq!(lines[3].style.bg, None);
+    }
+
+    #[test]
+    fn diff_gutter_marks_current_viewport() {
+        let lines = (0..10)
+            .map(|idx| Line::raw(format!("line {idx}")))
+            .collect::<Vec<_>>();
+        let visible = lines.iter().skip(4).take(4).cloned().collect::<Vec<_>>();
+        let lines = add_diff_gutter(visible, lines.len(), 4, 4, None);
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "│ ");
+        assert_eq!(lines[1].spans[0].content.as_ref(), "│ ");
+        assert_eq!(lines[2].spans[0].content.as_ref(), "█ ");
+        assert_eq!(lines[0].spans[1].content.as_ref(), "line 4");
+    }
+
+    #[test]
+    fn diff_gutter_marks_selected_line() {
+        let lines = (0..5)
+            .map(|idx| Line::raw(format!("line {idx}")))
+            .collect::<Vec<_>>();
+        let len = lines.len();
+        let lines = add_diff_gutter(lines, len, 0, 5, Some(2));
+
+        assert_eq!(lines[2].spans[0].content.as_ref(), "▶ ");
+        assert_eq!(lines[2].spans[0].style.bg, Some(Color::Rgb(210, 170, 40)));
+    }
+
+    #[test]
+    fn diff_lines_use_syntect_and_background_additions() {
+        let line = diff_line_for_file(
+            "+let value = \"hello\" // comment".to_string(),
+            Some("src/main.rs"),
+        );
+
+        assert_eq!(line.style.bg, Some(Color::Rgb(12, 42, 28)));
+        assert!(line.spans.len() > 3);
+        assert!(line.spans.iter().any(|span| span.content.as_ref() == "let"));
+        assert!(line.spans.iter().any(|span| span.style.fg.is_some()));
+    }
+
+    #[test]
+    fn diff_lines_background_removals() {
+        let line = diff_line_for_file("-let value = 1".to_string(), Some("src/main.rs"));
+
+        assert_eq!(line.style.bg, Some(Color::Rgb(52, 20, 24)));
+    }
+
+    #[test]
+    fn review_diff_toc_lists_files_and_hunks() {
+        let info = ReviewCommitInfo {
+            subject: "Update files".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let patch = vec![
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+            "@@ -10,2 +20,3 @@ fn demo()".to_string(),
+            "+new".to_string(),
+        ];
+
+        let entries = review_diff_toc_entries(&info, &patch, &BTreeSet::new());
+
+        assert_eq!(entries[0].label, "src/a.rs");
+        assert_eq!(entries[0].depth, 0);
+        assert_eq!(entries[1].label, "@@ fn demo()");
+        assert_eq!(entries[1].depth, 1);
+    }
+
+    #[test]
+    fn review_diff_location_maps_focused_line_to_file_line() {
+        let info = ReviewCommitInfo {
+            subject: "Update files".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let patch = vec![
+            "diff --git a/src/a.rs b/src/a.rs".to_string(),
+            "@@ -10,2 +20,3 @@ fn demo()".to_string(),
+            " context".to_string(),
+            "+new".to_string(),
+        ];
+
+        let location = review_diff_location_at_line(&info, &patch, &BTreeSet::new(), 5).unwrap();
+
+        assert_eq!(location.path, "src/a.rs");
+        assert_eq!(location.line, 21);
+    }
+
+    #[test]
     fn outline_rows_indent_visible_subissues() {
         let root = uuid::Uuid::from_u128(1);
         let child = uuid::Uuid::from_u128(2);
@@ -8386,6 +13982,65 @@ mod tests {
                 headings: 2,
             }
         );
+    }
+
+    #[test]
+    fn review_ticket_lines_include_metadata_and_title() {
+        let ticket = test_ticket(uuid::Uuid::from_u128(1), None, &[]);
+        let review = TicketReview {
+            branch_id: "review-cli@123".to_string(),
+            branch_name: Some("review-cli".to_string()),
+            title: "Review CLI changes".to_string(),
+            status: "changes-requested".to_string(),
+            revisions: vec!["a".to_string(), "b".to_string()],
+            ..Default::default()
+        };
+
+        let text = review_ticket_lines(&ticket, Some(&review), "12h", 80)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(
+            review_ticket_lines(&ticket, Some(&review), "12h", 80).len(),
+            1
+        );
+        assert!(text.contains("000"));
+        assert!(text.contains("CR"));
+        assert!(text.contains("12h"));
+        assert!(text.contains("2c"));
+        assert!(text.contains("review-cli"));
+        assert!(text.contains("Review CLI changes"));
+    }
+
+    #[test]
+    fn parse_review_branch_snapshot_uses_gitbutler_branch_show_commits() {
+        let json = br#"{
+            "branch": "feature",
+            "commitsAhead": 2,
+            "commits": [
+                {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "message": "Add branch picker"},
+                {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "message": "Prepare review"}
+            ],
+            "unassignedFiles": [],
+            "reviews": []
+        }"#;
+
+        let snapshot = parse_review_branch_snapshot("feature", json).unwrap();
+
+        assert_eq!(
+            snapshot.head_sha,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
+        assert_eq!(
+            snapshot.commits,
+            vec![
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ]
+        );
+        assert_eq!(snapshot.title, "Add branch picker");
     }
 
     fn test_ticket(id: uuid::Uuid, parent: Option<uuid::Uuid>, children: &[uuid::Uuid]) -> Ticket {
