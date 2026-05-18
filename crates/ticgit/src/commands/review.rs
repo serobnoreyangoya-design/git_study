@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -157,11 +157,13 @@ struct ReviewMessage {
     lines: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewRevisionChange {
     sha: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     change_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -532,12 +534,16 @@ fn refresh_revisions(
         .list_entries("review:revisions")
         .unwrap_or_default()
         .into_iter()
-        .map(|entry| entry.value)
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
         .collect::<Vec<_>>();
     let commits = revision_list(base_sha, head_sha)?;
+    let commits = commits
+        .iter()
+        .map(|sha| review_revision_change_for_commit(store, sha))
+        .collect::<Result<Vec<_>>>()?;
     target.remove("review:revisions")?;
-    for sha in &commits {
-        target.list_push("review:revisions", &sha)?;
+    for entry in &commits {
+        target.list_push("review:revisions", &format_review_revision(entry))?;
     }
     append_revision_change_history(store, branch_id, &previous)?;
     append_revision_change_history(store, branch_id, &commits)?;
@@ -547,28 +553,86 @@ fn refresh_revisions(
 fn append_revision_change_history(
     store: &ticgit_lib::TicketStore,
     branch_id: &str,
-    commits: &[String],
+    commits: &[ReviewRevisionChange],
 ) -> Result<()> {
     let target = store.session().target(&Target::branch(branch_id));
-    let mut seen = target
+    let mut history = target
         .list_entries("review:revision-history")
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|entry| serde_json::from_str::<ReviewRevisionChange>(&entry.value).ok())
-        .map(|entry| entry.sha)
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
+        .collect::<Vec<_>>();
+
+    let mut changed = false;
+    for entry in &mut history {
+        if entry.patch_id.is_none() {
+            entry.patch_id = ensure_commit_patch_id(store, &entry.sha)?;
+            changed |= entry.patch_id.is_some();
+        }
+    }
+
+    let mut seen = history
+        .iter()
+        .map(|entry| entry.sha.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    for sha in commits.iter().rev() {
-        if seen.insert(sha.clone()) {
-            target.list_push(
-                "review:revision-history",
-                &serde_json::to_string(&ReviewRevisionChange {
-                    sha: sha.clone(),
-                    change_id: commit_change_id(sha),
-                })?,
-            )?;
+    for entry in commits.iter().rev() {
+        if seen.insert(entry.sha.clone()) {
+            history.push(entry.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        target.remove("review:revision-history")?;
+        for entry in history {
+            target.list_push("review:revision-history", &serde_json::to_string(&entry)?)?;
         }
     }
     Ok(())
+}
+
+fn review_revision_change_for_commit(
+    store: &ticgit_lib::TicketStore,
+    sha: &str,
+) -> Result<ReviewRevisionChange> {
+    Ok(ReviewRevisionChange {
+        sha: sha.to_string(),
+        change_id: commit_change_id(sha),
+        patch_id: ensure_commit_patch_id(store, sha)?,
+    })
+}
+
+fn format_review_revision(entry: &ReviewRevisionChange) -> String {
+    format!(
+        "{}:{}:{}",
+        entry.sha,
+        entry.change_id.as_deref().unwrap_or_default(),
+        entry.patch_id.as_deref().unwrap_or_default()
+    )
+}
+
+fn parse_review_revision_change(value: &str) -> Option<ReviewRevisionChange> {
+    if let Ok(entry) = serde_json::from_str::<ReviewRevisionChange>(value) {
+        return Some(entry);
+    }
+
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((sha, rest)) = value.split_once(':') {
+        let (change_id, patch_id) = rest.split_once(':').unwrap_or((rest, ""));
+        return Some(ReviewRevisionChange {
+            sha: sha.to_string(),
+            change_id: non_empty(change_id),
+            patch_id: non_empty(patch_id),
+        });
+    }
+    Some(ReviewRevisionChange {
+        sha: value.to_string(),
+        change_id: None,
+        patch_id: None,
+    })
 }
 
 fn revision_list(base_sha: &str, head_sha: &str) -> Result<Vec<String>> {
@@ -611,6 +675,40 @@ fn commit_change_id(sha: &str) -> Option<String> {
         .lines()
         .take_while(|line| !line.is_empty())
         .find_map(|line| line.strip_prefix("change-id ").map(str::to_string))
+}
+
+fn ensure_commit_patch_id(store: &ticgit_lib::TicketStore, sha: &str) -> Result<Option<String>> {
+    let target = store.session().target(&Target::commit(sha)?);
+    if let Some(patch_id) = string_value(target.get_value("patch-id")?) {
+        return Ok(Some(patch_id));
+    }
+    let Some(patch_id) = commit_patch_id(sha) else {
+        return Ok(None);
+    };
+    target.set("patch-id", patch_id.as_str())?;
+    Ok(Some(patch_id))
+}
+
+fn commit_patch_id(sha: &str) -> Option<String> {
+    let mut diff = Command::new("git")
+        .args(["diff-tree", "--patch", sha])
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = diff.stdout.take()?;
+    let patch_id = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::from(stdout))
+        .output()
+        .ok()?;
+    let _ = diff.wait();
+    if !patch_id.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&patch_id.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
 }
 
 fn default_base_ref() -> String {
@@ -662,6 +760,10 @@ fn string_set(value: Option<MetaValue>) -> Vec<String> {
         Some(MetaValue::String(value)) if !value.is_empty() => vec![value],
         _ => Vec::new(),
     }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn split_optional_review_arg(args: Vec<String>) -> Result<(Option<String>, String)> {

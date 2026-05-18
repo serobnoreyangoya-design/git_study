@@ -433,6 +433,26 @@ impl TicketStore {
         Ok(())
     }
 
+    /// Delete a ticket and remove parent/child relationship references.
+    pub fn delete_ticket(&self, id: &Uuid) -> Result<()> {
+        let ticket = self.load(id)?;
+        let p = self.project_handle();
+
+        if let Some(parent_id) = ticket.parent {
+            p.set_remove(&keys::ticket_field(&parent_id, "children"), &id.to_string())?;
+        }
+
+        for child_id in &ticket.children {
+            p.remove(&keys::ticket_field(child_id, "parent"))?;
+        }
+
+        for (key, _) in p.get_all_values(Some(&keys::ticket_prefix(id)))? {
+            p.remove(&key)?;
+        }
+
+        Ok(())
+    }
+
     /// Add a dependency: `id` depends on `dependency_id`.
     /// The dependency ticket must exist. Circular dependencies are rejected.
     pub fn add_dependency(&self, id: &Uuid, dependency_id: &Uuid) -> Result<()> {
@@ -1704,5 +1724,47 @@ mod tests {
         let p2 = store.load(&p2.id).unwrap();
         assert!(!p1.children.contains(&child.id));
         assert!(p2.children.contains(&child.id));
+    }
+
+    #[test]
+    fn delete_ticket_removes_parent_child_references() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = store
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        store.delete_ticket(&child.id).unwrap();
+
+        assert!(store.load(&child.id).is_err());
+        let parent = store.load(&parent.id).unwrap();
+        assert!(!parent.children.contains(&child.id));
+    }
+
+    #[test]
+    fn delete_parent_unparents_children() {
+        let (store, _td) = test_store();
+        let parent = store.create("parent", NewTicketOpts::default()).unwrap();
+        let child = store
+            .create(
+                "child",
+                NewTicketOpts {
+                    parent: Some(parent.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        store.delete_ticket(&parent.id).unwrap();
+
+        assert!(store.load(&parent.id).is_err());
+        let child = store.load(&child.id).unwrap();
+        assert_eq!(child.parent, None);
     }
 }

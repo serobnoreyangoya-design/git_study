@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Stdout};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -216,6 +216,7 @@ struct App {
     active_view_name: Option<String>,
     saved_view_state: ListState,
     pending_delete_view: Option<String>,
+    pending_delete_issue: Option<uuid::Uuid>,
     pending_close_review: Option<(uuid::Uuid, String)>,
     base_status: Option<TicketStatus>,
     base_state: Option<TicketState>,
@@ -358,6 +359,8 @@ struct ReviewRevisionChange {
     sha: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     change_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -464,6 +467,7 @@ struct ReviewCommitInfo {
     updated: String,
     shortstat: String,
     change_id: Option<String>,
+    patch_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -484,6 +488,7 @@ enum Mode {
     Columns,
     SavedViews,
     ConfirmDeleteView,
+    ConfirmDeleteIssue,
     ConfirmCloseReview,
     ConfirmApproveReview,
     SaveView,
@@ -627,6 +632,7 @@ impl App {
             active_view_name: None,
             saved_view_state: ListState::default(),
             pending_delete_view: None,
+            pending_delete_issue: None,
             pending_close_review: None,
             base_status: Some(TicketStatus::Open),
             base_state: None,
@@ -873,6 +879,7 @@ impl App {
             Mode::Columns => self.draw_columns_modal(frame),
             Mode::SavedViews => self.draw_saved_views_modal(frame),
             Mode::ConfirmDeleteView => self.draw_delete_view_confirm_modal(frame),
+            Mode::ConfirmDeleteIssue => self.draw_delete_issue_confirm_modal(frame),
             Mode::ConfirmCloseReview => self.draw_close_review_confirm_modal(frame),
             Mode::ConfirmApproveReview => self.draw_approve_review_confirm_modal(frame),
             Mode::SaveView => self.draw_save_view_modal(frame),
@@ -1061,6 +1068,22 @@ impl App {
             Mode::ConfirmDeleteView => (
                 "delete view",
                 self.pending_delete_view.clone(),
+                vec![
+                    MenuHint {
+                        key: "y",
+                        desc: "delete",
+                    },
+                    MenuHint {
+                        key: "n/Esc",
+                        desc: "cancel",
+                    },
+                ],
+            ),
+            Mode::ConfirmDeleteIssue => (
+                "delete issue",
+                self.pending_delete_issue
+                    .and_then(|id| self.all_tickets.iter().find(|ticket| ticket.id == id))
+                    .map(|ticket| format!("{} {}", ticket.short_id(), ticket.title)),
                 vec![
                     MenuHint {
                         key: "y",
@@ -1570,6 +1593,10 @@ impl App {
                             desc: "subissues",
                         },
                         MenuHint {
+                            key: "D",
+                            desc: "delete",
+                        },
+                        MenuHint {
                             key: "s",
                             desc: "state",
                         },
@@ -1621,8 +1648,12 @@ impl App {
                             desc: "subissues",
                         },
                         MenuHint {
-                            key: "n",
-                            desc: "subissue",
+                            key: "n/N",
+                            desc: "new/subissue",
+                        },
+                        MenuHint {
+                            key: "D",
+                            desc: "delete",
                         },
                         MenuHint {
                             key: "P",
@@ -1726,6 +1757,14 @@ impl App {
                         MenuHint {
                             key: "n",
                             desc: "new",
+                        },
+                        MenuHint {
+                            key: "N",
+                            desc: "subissue",
+                        },
+                        MenuHint {
+                            key: "D",
+                            desc: "delete",
                         },
                         MenuHint {
                             key: "v",
@@ -3462,6 +3501,54 @@ impl App {
         frame.render_widget(modal, area);
     }
 
+    fn draw_delete_issue_confirm_modal(&self, frame: &mut Frame<'_>) {
+        let area = centered_rect(64, 9, frame.area());
+        let ticket = self
+            .pending_delete_issue
+            .and_then(|id| self.all_tickets.iter().find(|ticket| ticket.id == id));
+        let label = ticket
+            .map(|ticket| format!("{} {}", ticket.short_id(), ticket.title))
+            .unwrap_or_else(|| "<unknown issue>".to_string());
+        let label = truncate_display(&label, usize::from(area.width).saturating_sub(8));
+        let relationship_note = ticket
+            .map(
+                |ticket| match (ticket.parent.is_some(), ticket.children.len()) {
+                    (true, 0) => "This child will be removed from its parent.",
+                    (false, 1) => "Its child will be unparented.",
+                    (false, n) if n > 1 => "Its children will be unparented.",
+                    (true, 1) => {
+                        "It will be removed from its parent; its child will be unparented."
+                    }
+                    (true, _) => {
+                        "It will be removed from its parent; its children will be unparented."
+                    }
+                    _ => "This permanently removes the issue metadata.",
+                },
+            )
+            .unwrap_or("This permanently removes the issue metadata.");
+        let lines = vec![
+            Line::from(Span::styled(
+                format!("Delete issue `{label}`?"),
+                Style::default().fg(Color::LightRed),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                relationship_note,
+                Style::default().fg(Color::Gray),
+            )),
+            Line::raw(""),
+            Line::from(Span::styled(
+                "y delete   n/Esc cancel",
+                Style::default().fg(Color::Yellow),
+            )),
+        ];
+        let modal = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL).title("Delete Issue"))
+            .wrap(Wrap { trim: false });
+        frame.render_widget(Clear, area);
+        frame.render_widget(modal, area);
+    }
+
     fn draw_close_review_confirm_modal(&self, frame: &mut Frame<'_>) {
         let area = centered_rect(64, 7, frame.area());
         let branch = self
@@ -3758,6 +3845,10 @@ impl App {
                 help_section(&mut lines, "Delete View");
                 lines.push(help_columns(("y", "delete"), Some(("n/Esc", "cancel"))));
             }
+            Mode::ConfirmDeleteIssue => {
+                help_section(&mut lines, "Delete Issue");
+                lines.push(help_columns(("y", "delete"), Some(("n/Esc", "cancel"))));
+            }
             Mode::ConfirmCloseReview => {
                 help_section(&mut lines, "Close Review");
                 lines.push(help_columns(("y", "close"), Some(("n/Esc", "cancel"))));
@@ -3994,6 +4085,10 @@ impl App {
                 ));
                 lines.push(help_columns(("c", "comment"), Some(("t", "manage tags"))));
                 lines.push(help_columns(("p", "priority"), Some(("o", "order"))));
+                lines.push(help_columns(
+                    ("n/N", "new/subissue"),
+                    Some(("D", "delete issue")),
+                ));
 
                 help_section(&mut lines, "Views");
                 lines.push(help_columns(("b", "list view"), Some(("d", "stats view"))));
@@ -4011,7 +4106,7 @@ impl App {
                 ));
                 lines.push(help_columns(
                     ("Enter", "details"),
-                    Some(("n", "new/subissue")),
+                    Some(("n/N", "new/subissue")),
                 ));
                 lines.push(help_columns(("P", "jump parent"), Some(("m", "comments"))));
                 lines.push(help_columns(("+/-", "resize detail"), None));
@@ -4032,7 +4127,7 @@ impl App {
                     Some(("i", "edit spec")),
                 ));
                 lines.push(help_columns(("c", "comment"), Some(("t", "manage tags"))));
-                lines.push(help_columns(("p", "priority"), None));
+                lines.push(help_columns(("p", "priority"), Some(("D", "delete issue"))));
 
                 help_section(&mut lines, "Views");
                 lines.push(help_columns(("b", "board view"), Some(("d", "stats view"))));
@@ -4109,6 +4204,10 @@ impl App {
             }
             Mode::ConfirmDeleteView => {
                 self.handle_delete_view_confirm_key(key)?;
+                false
+            }
+            Mode::ConfirmDeleteIssue => {
+                self.handle_delete_issue_confirm_key(key)?;
                 false
             }
             Mode::ConfirmCloseReview => {
@@ -4334,15 +4433,17 @@ impl App {
             }
             KeyCode::Char('n') => {
                 if self.active_tab == TuiTab::Issues {
-                    if let Some(parent_id) = self.detail.map(|idx| self.tickets[idx].id) {
-                        self.begin_create_subissue(parent_id);
-                    } else {
-                        self.begin_create();
-                    }
+                    self.begin_create();
                 } else if self.active_tab == TuiTab::Writeups {
                     self.create_writeup_in_editor(terminal)?;
                 } else if self.active_tab == TuiTab::Reviews {
                     self.begin_review_branch_picker()?;
+                }
+                false
+            }
+            KeyCode::Char('N') => {
+                if self.active_tab == TuiTab::Issues {
+                    self.begin_create_subissue_for_selected();
                 }
                 false
             }
@@ -4499,6 +4600,12 @@ impl App {
             KeyCode::Char('C') => {
                 if self.active_tab == TuiTab::Issues {
                     self.claim_selected()?;
+                }
+                false
+            }
+            KeyCode::Char('D') => {
+                if self.active_tab == TuiTab::Issues {
+                    self.begin_delete_issue_confirm();
                 }
                 false
             }
@@ -4700,6 +4807,19 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.pending_delete_view = None;
                 self.mode = Mode::SavedViews;
+                self.status = Some("Cancelled.".to_string());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_delete_issue_confirm_key(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.delete_pending_issue()?,
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.pending_delete_issue = None;
+                self.mode = Mode::Normal;
                 self.status = Some("Cancelled.".to_string());
             }
             _ => {}
@@ -4950,6 +5070,23 @@ impl App {
         self.mode = Mode::Create;
     }
 
+    fn begin_create_subissue_for_selected(&mut self) {
+        let Some(parent_id) = self.selected_ticket().map(|ticket| ticket.id) else {
+            self.status = Some("Select a parent issue first.".to_string());
+            return;
+        };
+        self.begin_create_subissue(parent_id);
+    }
+
+    fn begin_delete_issue_confirm(&mut self) {
+        let Some(ticket) = self.selected_ticket() else {
+            self.status = Some("Select an issue first.".to_string());
+            return;
+        };
+        self.pending_delete_issue = Some(ticket.id);
+        self.mode = Mode::ConfirmDeleteIssue;
+    }
+
     fn begin_review_branch_picker(&mut self) -> Result<()> {
         self.review_branch_choices = load_review_branch_choices(&self.open_review_branch_names())?;
         if self.review_branch_choices.is_empty() {
@@ -5087,6 +5224,22 @@ impl App {
             self.status = Some(format!("No view named `{name}`."));
         }
         self.mode = Mode::SavedViews;
+        Ok(())
+    }
+
+    fn delete_pending_issue(&mut self) -> Result<()> {
+        let Some(id) = self.pending_delete_issue.take() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        let label = self.issue_label(id);
+        self.store.delete_ticket(&id)?;
+        self.detail = None;
+        self.comments_mode = false;
+        self.comment_state.select(None);
+        self.mode = Mode::Normal;
+        self.reload(None)?;
+        self.status = Some(format!("Deleted {label}."));
         Ok(())
     }
 
@@ -8739,40 +8892,80 @@ fn refresh_review_revisions_from_commits(
         .list_entries("review:revisions")
         .unwrap_or_default()
         .into_iter()
-        .map(|entry| entry.value)
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
         .collect::<Vec<_>>();
+    let commits = commits
+        .iter()
+        .map(|sha| review_revision_change_for_commit(store, sha))
+        .collect::<Result<Vec<_>>>()?;
     target.remove("review:revisions")?;
-    for sha in commits {
-        target.list_push("review:revisions", sha)?;
+    for entry in &commits {
+        target.list_push("review:revisions", &format_review_revision(entry))?;
     }
     append_review_revision_changes(store, branch_id, &previous)?;
-    append_review_revision_changes(store, branch_id, commits)?;
+    append_review_revision_changes(store, branch_id, &commits)?;
     Ok(())
 }
 
 fn append_review_revision_changes(
     store: &TicketStore,
     branch_id: &str,
-    commits: &[String],
+    commits: &[ReviewRevisionChange],
 ) -> Result<()> {
     let target = store.session().target(&Target::branch(branch_id));
-    let mut seen = target
+    let mut history = target
         .list_entries("review:revision-history")
         .unwrap_or_default()
         .into_iter()
         .filter_map(|entry| parse_review_revision_change(&entry.value))
-        .map(|entry| entry.sha)
+        .collect::<Vec<_>>();
+
+    let mut changed = false;
+    for entry in &mut history {
+        if entry.patch_id.is_none() {
+            entry.patch_id = ensure_commit_patch_id(store, &entry.sha)?;
+            changed |= entry.patch_id.is_some();
+        }
+    }
+
+    let mut seen = history
+        .iter()
+        .map(|entry| entry.sha.clone())
         .collect::<BTreeSet<_>>();
-    for sha in commits.iter().rev() {
-        if seen.insert(sha.clone()) {
-            let entry = ReviewRevisionChange {
-                sha: sha.clone(),
-                change_id: commit_change_id(sha),
-            };
+    for entry in commits.iter().rev() {
+        if seen.insert(entry.sha.clone()) {
+            history.push(entry.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        target.remove("review:revision-history")?;
+        for entry in history {
             target.list_push("review:revision-history", &serde_json::to_string(&entry)?)?;
         }
     }
     Ok(())
+}
+
+fn review_revision_change_for_commit(
+    store: &TicketStore,
+    sha: &str,
+) -> Result<ReviewRevisionChange> {
+    Ok(ReviewRevisionChange {
+        sha: sha.to_string(),
+        change_id: commit_change_id(sha),
+        patch_id: ensure_commit_patch_id(store, sha)?,
+    })
+}
+
+fn format_review_revision(entry: &ReviewRevisionChange) -> String {
+    format!(
+        "{}:{}:{}",
+        entry.sha,
+        entry.change_id.as_deref().unwrap_or_default(),
+        entry.patch_id.as_deref().unwrap_or_default()
+    )
 }
 
 fn review_revision_list(base_sha: &str, head_sha: &str) -> Result<Vec<String>> {
@@ -8891,10 +9084,7 @@ fn load_review_metadata(store: &TicketStore, branch_id: &str) -> TicketReview {
         revision_changes = revisions
             .iter()
             .rev()
-            .map(|sha| ReviewRevisionChange {
-                sha: sha.clone(),
-                change_id: None,
-            })
+            .filter_map(|entry| parse_review_revision_change(entry))
             .collect();
     }
     let messages = target
@@ -8931,15 +9121,27 @@ fn ticket_code_review(branch_name: &str) -> TicketReview {
 }
 
 fn parse_review_revision_change(value: &str) -> Option<ReviewRevisionChange> {
-    serde_json::from_str::<ReviewRevisionChange>(value)
-        .ok()
-        .or_else(|| {
-            let value = value.trim();
-            (!value.is_empty()).then(|| ReviewRevisionChange {
-                sha: value.to_string(),
-                change_id: None,
-            })
-        })
+    if let Ok(entry) = serde_json::from_str::<ReviewRevisionChange>(value) {
+        return Some(entry);
+    }
+
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((sha, rest)) = value.split_once(':') {
+        let (change_id, patch_id) = rest.split_once(':').unwrap_or((rest, ""));
+        return Some(ReviewRevisionChange {
+            sha: sha.to_string(),
+            change_id: non_empty(change_id),
+            patch_id: non_empty(patch_id),
+        });
+    }
+    Some(ReviewRevisionChange {
+        sha: value.to_string(),
+        change_id: None,
+        patch_id: None,
+    })
 }
 
 fn code_branch_name(code: &str) -> Option<&str> {
@@ -8963,6 +9165,10 @@ fn meta_set(value: Option<MetaValue>) -> BTreeSet<String> {
     }
 }
 
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 fn review_branch_label(review: &TicketReview) -> String {
     match review.branch_name.as_deref() {
         Some(name) if name != review.branch_id => format!("{name} ({})", review.branch_id),
@@ -8973,7 +9179,11 @@ fn review_branch_label(review: &TicketReview) -> String {
 
 fn review_commits(review: &TicketReview) -> Vec<String> {
     if !review.revisions.is_empty() {
-        return review.revisions.clone();
+        return review
+            .revisions
+            .iter()
+            .filter_map(|entry| parse_review_revision_change(entry).map(|entry| entry.sha))
+            .collect();
     }
     review.head_sha.iter().cloned().collect()
 }
@@ -9088,6 +9298,7 @@ fn review_commit_info(sha: &str) -> ReviewCommitInfo {
         updated,
         shortstat: commit_shortstat(sha),
         change_id: commit_change_id(sha),
+        patch_id: commit_patch_id(sha),
     }
 }
 
@@ -9103,6 +9314,40 @@ fn commit_change_id(sha: &str) -> Option<String> {
         .lines()
         .take_while(|line| !line.is_empty())
         .find_map(|line| line.strip_prefix("change-id ").map(str::to_string))
+}
+
+fn ensure_commit_patch_id(store: &TicketStore, sha: &str) -> Result<Option<String>> {
+    let target = store.session().target(&Target::commit(sha)?);
+    if let Some(patch_id) = meta_string(target.get_value("patch-id")?) {
+        return Ok(Some(patch_id));
+    }
+    let Some(patch_id) = commit_patch_id(sha) else {
+        return Ok(None);
+    };
+    target.set("patch-id", patch_id.as_str())?;
+    Ok(Some(patch_id))
+}
+
+fn commit_patch_id(sha: &str) -> Option<String> {
+    let mut diff = Command::new("git")
+        .args(["diff-tree", "--patch", sha])
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = diff.stdout.take()?;
+    let patch_id = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::from(stdout))
+        .output()
+        .ok()?;
+    let _ = diff.wait();
+    if !patch_id.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&patch_id.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
 }
 
 fn commit_shortstat(sha: &str) -> String {
@@ -9776,50 +10021,90 @@ fn review_commit_versions_from_cache(
     infos: &HashMap<String, ReviewCommitInfo>,
 ) -> Vec<usize> {
     if !revision_changes.is_empty() {
-        let mut counts = HashMap::new();
+        let mut patch_versions_by_key: HashMap<String, HashMap<String, usize>> = HashMap::new();
         let mut versions_by_sha = HashMap::new();
         for entry in revision_changes {
-            let key = entry
-                .change_id
-                .as_deref()
-                .or_else(|| {
-                    infos
-                        .get(&entry.sha)
-                        .and_then(|info| info.change_id.as_deref())
-                })
-                .unwrap_or(entry.sha.as_str())
-                .to_string();
-            let count = counts.entry(key).or_insert(0usize);
-            *count += 1;
-            versions_by_sha.insert(entry.sha.clone(), *count);
+            let key = review_revision_identity(entry, infos);
+            let patch_key = review_revision_patch(entry, infos);
+            let patch_versions = patch_versions_by_key.entry(key).or_default();
+            let next_version = patch_versions.len() + 1;
+            let version = *patch_versions.entry(patch_key).or_insert(next_version);
+            versions_by_sha.insert(entry.sha.clone(), version);
         }
         return commits
             .iter()
             .map(|sha| {
                 versions_by_sha.get(sha).copied().unwrap_or_else(|| {
-                    let key = infos
-                        .get(sha)
-                        .and_then(|info| info.change_id.as_deref())
-                        .unwrap_or(sha.as_str());
-                    counts.get(key).copied().unwrap_or(1)
+                    let entry = ReviewRevisionChange {
+                        sha: sha.clone(),
+                        change_id: None,
+                        patch_id: None,
+                    };
+                    let key = review_revision_identity(&entry, infos);
+                    let patch_key = review_revision_patch(&entry, infos);
+                    patch_versions_by_key
+                        .get(&key)
+                        .and_then(|patch_versions| patch_versions.get(&patch_key))
+                        .copied()
+                        .unwrap_or(1)
                 })
             })
             .collect();
     }
 
-    let mut counts = HashMap::new();
+    let mut patch_versions_by_key: HashMap<String, HashMap<String, usize>> = HashMap::new();
     let mut versions = vec![1; commits.len()];
     for (idx, sha) in commits.iter().enumerate().rev() {
-        let key = infos
-            .get(sha)
-            .and_then(|info| info.change_id.as_deref())
-            .unwrap_or(sha.as_str())
-            .to_string();
-        let count = counts.entry(key).or_insert(0usize);
-        *count += 1;
-        versions[idx] = *count;
+        let entry = ReviewRevisionChange {
+            sha: sha.clone(),
+            change_id: None,
+            patch_id: None,
+        };
+        let key = review_revision_identity(&entry, infos);
+        let patch_key = review_revision_patch(&entry, infos);
+        let patch_versions = patch_versions_by_key.entry(key).or_default();
+        let next_version = patch_versions.len() + 1;
+        versions[idx] = *patch_versions.entry(patch_key).or_insert(next_version);
     }
     versions
+}
+
+fn review_revision_identity(
+    entry: &ReviewRevisionChange,
+    infos: &HashMap<String, ReviewCommitInfo>,
+) -> String {
+    entry
+        .change_id
+        .as_deref()
+        .or_else(|| {
+            infos
+                .get(&entry.sha)
+                .and_then(|info| info.change_id.as_deref())
+        })
+        .or(entry.patch_id.as_deref())
+        .or_else(|| {
+            infos
+                .get(&entry.sha)
+                .and_then(|info| info.patch_id.as_deref())
+        })
+        .unwrap_or(entry.sha.as_str())
+        .to_string()
+}
+
+fn review_revision_patch(
+    entry: &ReviewRevisionChange,
+    infos: &HashMap<String, ReviewCommitInfo>,
+) -> String {
+    entry
+        .patch_id
+        .as_deref()
+        .or_else(|| {
+            infos
+                .get(&entry.sha)
+                .and_then(|info| info.patch_id.as_deref())
+        })
+        .unwrap_or(entry.sha.as_str())
+        .to_string()
 }
 
 fn review_commit_status_line(status: &CommitReviewStatus) -> Line<'static> {
@@ -13467,18 +13752,22 @@ mod tests {
             ReviewRevisionChange {
                 sha: "old-a".to_string(),
                 change_id: Some("change-a".to_string()),
+                patch_id: None,
             },
             ReviewRevisionChange {
                 sha: "old-b".to_string(),
                 change_id: Some("change-b".to_string()),
+                patch_id: None,
             },
             ReviewRevisionChange {
                 sha: "new-a".to_string(),
                 change_id: Some("change-a".to_string()),
+                patch_id: None,
             },
             ReviewRevisionChange {
                 sha: "only-b".to_string(),
                 change_id: Some("change-b".to_string()),
+                patch_id: None,
             },
         ];
         let infos = HashMap::new();
@@ -13486,6 +13775,59 @@ mod tests {
         assert_eq!(
             review_commit_versions_from_cache(&commits, &revision_changes, &infos),
             vec![2, 2]
+        );
+    }
+
+    #[test]
+    fn review_commit_versions_reuse_same_patch_id_version() {
+        let commits = vec!["new-a".to_string(), "only-b".to_string()];
+        let revision_changes = vec![
+            ReviewRevisionChange {
+                sha: "old-a".to_string(),
+                change_id: Some("change-a".to_string()),
+                patch_id: Some("patch-a1".to_string()),
+            },
+            ReviewRevisionChange {
+                sha: "rebased-a".to_string(),
+                change_id: Some("change-a".to_string()),
+                patch_id: Some("patch-a1".to_string()),
+            },
+            ReviewRevisionChange {
+                sha: "new-a".to_string(),
+                change_id: Some("change-a".to_string()),
+                patch_id: Some("patch-a2".to_string()),
+            },
+            ReviewRevisionChange {
+                sha: "only-b".to_string(),
+                change_id: Some("change-b".to_string()),
+                patch_id: Some("patch-b1".to_string()),
+            },
+        ];
+        let infos = HashMap::new();
+
+        assert_eq!(
+            review_commit_versions_from_cache(&commits, &revision_changes, &infos),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn review_revision_entries_parse_patch_id_format() {
+        assert_eq!(
+            parse_review_revision_change("abc123:change-1:patch-1"),
+            Some(ReviewRevisionChange {
+                sha: "abc123".to_string(),
+                change_id: Some("change-1".to_string()),
+                patch_id: Some("patch-1".to_string()),
+            })
+        );
+        assert_eq!(
+            parse_review_revision_change("def456::patch-2"),
+            Some(ReviewRevisionChange {
+                sha: "def456".to_string(),
+                change_id: None,
+                patch_id: Some("patch-2".to_string()),
+            })
         );
     }
 

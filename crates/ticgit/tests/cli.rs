@@ -126,6 +126,7 @@ fn review_cli_records_branch_review_flow() {
         .stdout(predicate::str::contains(
             "Description: Stable review description",
         ))
+        .stdout(predicate::str::contains("::"))
         .stdout(predicate::str::contains("Last commit message").not());
 
     repo.ti()
