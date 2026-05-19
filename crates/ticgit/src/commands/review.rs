@@ -9,7 +9,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::commands::open_store;
-use crate::render::{self, ReviewTableRow};
+use crate::render::{self, open_ticket_ref_lengths, ReviewTableRow};
 
 const REVIEW_INDEX_KEY: &str = "review:branches";
 
@@ -77,12 +77,28 @@ pub struct ListArgs {
     /// Only show reviews with this status.
     #[arg(long)]
     pub status: Option<String>,
+
+    /// Output as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Output as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 #[derive(Debug, Parser)]
 pub struct ShowArgs {
     /// Branch name or branch-id. Defaults to the current branch.
     pub review: Option<String>,
+
+    /// Output as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Output as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -177,7 +193,24 @@ struct ReviewRevisionChange {
 #[derive(Debug)]
 struct ReviewRef {
     branch_id: String,
-    branch_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReviewOutput {
+    branch_id: String,
+    branch: String,
+    ticket_id: Option<String>,
+    ticket_ref: Option<String>,
+    title: String,
+    description: String,
+    status: String,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    integration_sha: Option<String>,
+    reviewers: Vec<String>,
+    revisions: Vec<ReviewRevisionChange>,
+    messages: Vec<ReviewMessage>,
+    approvals: String,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -251,41 +284,47 @@ fn list(args: ListArgs) -> Result<()> {
     let project = store.session().target(&Target::project());
     let ids = string_set(project.get_value(REVIEW_INDEX_KEY)?);
     if ids.is_empty() {
-        println!("No reviews");
+        if args.json {
+            println!("[]");
+        } else if args.markdown {
+            println!("{}", reviews_markdown(&[]));
+        } else {
+            println!("No reviews");
+        }
         return Ok(());
     }
 
+    let all_tickets = store.list()?;
+    let ref_lengths = open_ticket_ref_lengths(&all_tickets);
     let mut rows = Vec::new();
+    let mut outputs = Vec::new();
     for branch_id in ids {
-        let target = store.session().target(&Target::branch(&branch_id));
-        let status = string_value(target.get_value("status")?).unwrap_or_else(|| "unknown".into());
-        if should_skip_review_list_row(&args, &status) {
+        let output = review_output_for_branch(&store, &branch_id, &all_tickets, &ref_lengths)?;
+        if should_skip_review_list_row(&args, &output.status) {
             continue;
         }
-        let title = string_value(target.get_value("title")?).unwrap_or_default();
-        let branch = string_value(target.get_value("code:branch")?).unwrap_or(branch_id);
-        let revisions = target.list_entries("review:revisions").unwrap_or_default();
-        let commits = revisions
-            .iter()
-            .filter_map(|entry| parse_review_revision_change(&entry.value).map(|entry| entry.sha))
-            .collect::<Vec<_>>();
-        let messages = target
-            .list_entries("review:messages")
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|entry| serde_json::from_str::<ReviewMessage>(&entry.value).ok())
-            .collect::<Vec<_>>();
-        let progress = review_progress(&store, &commits, &messages);
         rows.push(ReviewTableRow {
-            branch,
-            status,
-            title,
-            approvals: review_progress_label(progress.approved, progress.total),
+            ticket: output.ticket_ref.clone(),
+            ticket_unique_chars: output
+                .ticket_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .and_then(|id| ref_lengths.get(&id).copied())
+                .unwrap_or(6),
+            branch: output.branch.clone(),
+            status: output.status.clone(),
+            title: output.title.clone(),
+            approvals: output.approvals.clone(),
         });
+        outputs.push(output);
     }
 
     if rows.is_empty() {
-        if let Some(status) = args.status.as_deref() {
+        if args.json {
+            println!("[]");
+        } else if args.markdown {
+            println!("{}", reviews_markdown(&[]));
+        } else if let Some(status) = args.status.as_deref() {
             println!("No reviews with status `{status}`");
         } else if args.all {
             println!("No reviews");
@@ -295,7 +334,13 @@ fn list(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    print!("{}", render::reviews_table(&rows));
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outputs)?);
+    } else if args.markdown {
+        println!("{}", reviews_markdown(&outputs));
+    } else {
+        print!("{}", render::reviews_table(&rows));
+    }
     Ok(())
 }
 
@@ -386,57 +431,177 @@ fn review_commit_counts(
     (reviewed.len(), approvals.len())
 }
 
+fn review_output_for_branch(
+    store: &ticgit_lib::TicketStore,
+    branch_id: &str,
+    all_tickets: &[ticgit_lib::Ticket],
+    ref_lengths: &std::collections::BTreeMap<uuid::Uuid, usize>,
+) -> Result<ReviewOutput> {
+    let target = store.session().target(&Target::branch(branch_id));
+    let branch = string_value(target.get_value("code:branch")?).unwrap_or_else(|| branch_id.into());
+    let ticket_id = string_set(target.get_value("issue:id")?)
+        .into_iter()
+        .filter_map(|id| uuid::Uuid::parse_str(&id).ok())
+        .next();
+    let ticket_ref = ticket_id.and_then(|id| {
+        all_tickets
+            .iter()
+            .find(|ticket| ticket.id == id)
+            .map(|ticket| {
+                let len = ref_lengths.get(&ticket.id).copied().unwrap_or(6).max(6);
+                ticket.id.to_string().replace('-', "")[..len].to_string()
+            })
+    });
+    let ticket_id = ticket_id.map(|id| id.to_string());
+    let revisions = target
+        .list_entries("review:revisions")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
+        .collect::<Vec<_>>();
+    let commits = revisions
+        .iter()
+        .map(|entry| entry.sha.clone())
+        .collect::<Vec<_>>();
+    let messages = target
+        .list_entries("review:messages")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| serde_json::from_str::<ReviewMessage>(&entry.value).ok())
+        .collect::<Vec<_>>();
+    let progress = review_progress(store, &commits, &messages);
+    Ok(ReviewOutput {
+        branch_id: branch_id.to_string(),
+        branch,
+        ticket_id,
+        ticket_ref,
+        title: string_value(target.get_value("title")?).unwrap_or_default(),
+        description: string_value(target.get_value("description")?).unwrap_or_default(),
+        status: string_value(target.get_value("status")?).unwrap_or_else(|| "unknown".into()),
+        base_sha: string_value(target.get_value("base:sha")?),
+        head_sha: string_value(target.get_value("head:sha")?),
+        integration_sha: string_value(target.get_value("integration:sha")?),
+        reviewers: string_set(target.get_value("review:reviewers")?),
+        revisions,
+        messages,
+        approvals: review_progress_label(progress.approved, progress.total),
+    })
+}
+
+fn reviews_markdown(reviews: &[ReviewOutput]) -> String {
+    let mut out = format!("# Reviews\n\n- Count: {}\n\n", reviews.len());
+    out.push_str("| Ticket | Branch | Review | Status | Title |\n");
+    out.push_str("|---|---|---:|---|---|\n");
+    for review in reviews {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            review.ticket_ref.as_deref().unwrap_or(""),
+            markdown_cell(&review.branch),
+            review.approvals,
+            markdown_cell(&review.status),
+            markdown_cell(&review.title)
+        ));
+    }
+    out
+}
+
+fn review_markdown(review: &ReviewOutput) -> String {
+    let mut out = format!("# Review: {}\n\n", review.title);
+    out.push_str(&format!("- Branch: `{}`\n", review.branch));
+    if let Some(ticket_ref) = review.ticket_ref.as_deref() {
+        out.push_str(&format!("- Ticket: `{ticket_ref}`\n"));
+    }
+    out.push_str(&format!("- Status: `{}`\n", review.status));
+    out.push_str(&format!("- Approvals: `{}`\n", review.approvals));
+    if !review.description.is_empty() {
+        out.push_str("\n## Description\n\n");
+        out.push_str(&review.description);
+        out.push('\n');
+    }
+    if !review.revisions.is_empty() {
+        out.push_str("\n## Revisions\n\n");
+        for revision in &review.revisions {
+            out.push_str(&format!("- `{}`\n", format_review_revision(revision)));
+        }
+    }
+    if !review.messages.is_empty() {
+        out.push_str("\n## Messages\n\n");
+        for message in &review.messages {
+            out.push_str(&format!(
+                "- **{}** {}{}: {}\n",
+                markdown_cell(&message.message_type),
+                markdown_cell(&message.author),
+                message_location(message),
+                markdown_cell(&message.body)
+            ));
+        }
+    }
+    out
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
 fn show(args: ShowArgs) -> Result<()> {
     let store = open_store()?;
     let review = resolve_review(&store, args.review.as_deref())?;
-    let target = store.session().target(&Target::branch(&review.branch_id));
-    println!("Review: {}", review.branch_id);
-    if let Some(branch) = review.branch_name {
-        println!("Branch: {branch}");
+    let all_tickets = store.list()?;
+    let ref_lengths = open_ticket_ref_lengths(&all_tickets);
+    let output = review_output_for_branch(&store, &review.branch_id, &all_tickets, &ref_lengths)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
     }
-    for (label, key) in [
-        ("Title", "title"),
-        ("Description", "description"),
-        ("Status", "status"),
-        ("Base", "base:sha"),
-        ("Head", "head:sha"),
-        ("Integration", "integration:sha"),
+    if args.markdown {
+        println!("{}", review_markdown(&output));
+        return Ok(());
+    }
+
+    println!("Review: {}", output.branch_id);
+    println!("Branch: {}", output.branch);
+    if let Some(ticket_ref) = output.ticket_ref.as_deref() {
+        println!("Tickets: {ticket_ref}");
+    }
+    for (label, value) in [
+        ("Title", output.title.as_str()),
+        ("Description", output.description.as_str()),
+        ("Status", output.status.as_str()),
+        ("Approvals", output.approvals.as_str()),
     ] {
-        if let Some(value) = string_value(target.get_value(key)?) {
-            if !value.is_empty() {
-                println!("{label}: {value}");
-            }
+        if !value.is_empty() {
+            println!("{label}: {value}");
         }
     }
-    for (label, key) in [("Tickets", "issue:id"), ("Reviewers", "review:reviewers")] {
-        let values = string_set(target.get_value(key)?);
-        if !values.is_empty() {
-            println!("{label}: {}", values.join(", "));
+    for (label, value) in [
+        ("Base", output.base_sha.as_deref()),
+        ("Head", output.head_sha.as_deref()),
+        ("Integration", output.integration_sha.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            println!("{label}: {value}");
         }
+    }
+    if !output.reviewers.is_empty() {
+        println!("Reviewers: {}", output.reviewers.join(", "));
     }
 
-    let revisions = target.list_entries("review:revisions").unwrap_or_default();
-    if !revisions.is_empty() {
+    if !output.revisions.is_empty() {
         println!("Revisions:");
-        for entry in revisions {
-            println!("  {}", entry.value);
+        for entry in &output.revisions {
+            println!("  {}", format_review_revision(entry));
         }
     }
 
-    let messages = target.list_entries("review:messages").unwrap_or_default();
-    if !messages.is_empty() {
+    if !output.messages.is_empty() {
         println!("Messages:");
-        for entry in messages {
-            match serde_json::from_str::<ReviewMessage>(&entry.value) {
-                Ok(message) => {
-                    let location = message_location(&message);
-                    println!(
-                        "  [{}] {}{}: {}",
-                        message.message_type, message.author, location, message.body
-                    );
-                }
-                Err(_) => println!("  {}", entry.value),
-            }
+        for message in &output.messages {
+            let location = message_location(message);
+            println!(
+                "  [{}] {}{}: {}",
+                message.message_type, message.author, location, message.body
+            );
         }
     }
     Ok(())
@@ -594,21 +759,25 @@ fn resolve_review(store: &ticgit_lib::TicketStore, explicit: Option<&str>) -> Re
         Some(name) => name.to_string(),
         None => current_branch()?,
     };
+    if let Ok(ticket_id) = store.resolve_id(&name) {
+        if let Some(branch_id) = string_value(
+            store
+                .session()
+                .target(&Target::project())
+                .get_value(&keys::ticket_field(&ticket_id, "branch-id"))?,
+        ) {
+            return Ok(ReviewRef { branch_id });
+        }
+    }
+
     let branch_target = store.session().target(&Target::branch(&name));
     if let Some(branch_id) = string_value(branch_target.get_value("branch-id")?) {
-        return Ok(ReviewRef {
-            branch_id,
-            branch_name: Some(name),
-        });
+        return Ok(ReviewRef { branch_id });
     }
 
     let review_target = store.session().target(&Target::branch(&name));
     if review_target.get_value("status")?.is_some() || review_target.get_value("title")?.is_some() {
-        let branch_name = string_value(review_target.get_value("code:branch")?);
-        return Ok(ReviewRef {
-            branch_id: name,
-            branch_name,
-        });
+        return Ok(ReviewRef { branch_id: name });
     }
 
     bail!("no review metadata found for `{name}`; run `ti review new` first")

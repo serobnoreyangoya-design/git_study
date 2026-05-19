@@ -92,6 +92,8 @@ pub fn tickets_table_with_refs(
 
 #[derive(Debug, Clone)]
 pub struct ReviewTableRow {
+    pub ticket: Option<String>,
+    pub ticket_unique_chars: usize,
     pub branch: String,
     pub approvals: String,
     pub status: String,
@@ -108,6 +110,7 @@ pub fn reviews_table(rows: &[ReviewTableRow]) -> String {
 
 fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
     let width = width.saturating_sub(1).max(1);
+    const TICKET_WIDTH: usize = 6;
     const REVIEW_WIDTH: usize = 5;
     const STATUS_WIDTH: usize = 8;
     const MIN_BRANCH_WIDTH: usize = 12;
@@ -120,7 +123,8 @@ fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
         .max()
         .unwrap_or(MIN_BRANCH_WIDTH)
         .clamp(MIN_BRANCH_WIDTH, MAX_BRANCH_WIDTH);
-    let fixed_without_title = 2 + natural_branch_width + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1;
+    let fixed_without_title =
+        2 + TICKET_WIDTH + 1 + natural_branch_width + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1;
     let (branch_width, title_width) = if fixed_without_title + MIN_TITLE_WIDTH <= width {
         (
             natural_branch_width,
@@ -130,9 +134,12 @@ fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
         )
     } else {
         let branch_width = width
-            .saturating_sub(2 + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1 + MIN_TITLE_WIDTH)
+            .saturating_sub(
+                2 + TICKET_WIDTH + 1 + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1 + MIN_TITLE_WIDTH,
+            )
             .clamp(MIN_BRANCH_WIDTH.min(width), natural_branch_width);
-        let fixed_without_title = 2 + branch_width + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1;
+        let fixed_without_title =
+            2 + TICKET_WIDTH + 1 + branch_width + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1;
         (
             branch_width,
             width
@@ -143,7 +150,8 @@ fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
 
     let mut out = String::new();
     let header = format!(
-        "  {} {} {} {}",
+        "  {} {} {} {} {}",
+        fit("TicId", TICKET_WIDTH),
         fit("Branch", branch_width),
         fit("Rv", REVIEW_WIDTH),
         fit("Status", STATUS_WIDTH),
@@ -156,6 +164,8 @@ fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
 
     for row in rows {
         out.push_str("  ");
+        out.push_str(&styled_review_ticket(row, TICKET_WIDTH));
+        out.push(' ');
         out.push_str(&ansi(ANSI_CYAN, &fit(&flatten(&row.branch), branch_width)));
         out.push(' ');
         out.push_str(&ansi(
@@ -173,6 +183,21 @@ fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
     }
 
     out
+}
+
+fn styled_review_ticket(row: &ReviewTableRow, width: usize) -> String {
+    let Some(ticket) = row.ticket.as_deref() else {
+        return ansi(ANSI_CYAN, &fit("", width));
+    };
+    let unique_len = row.ticket_unique_chars.min(ticket.len());
+    let visible = truncate_display(ticket, width);
+    let (unique, rest) = visible.split_at(unique_len.min(visible.len()));
+    format!(
+        "{}{}{}",
+        ansi(ANSI_YELLOW, unique),
+        ansi(ANSI_CYAN, rest),
+        " ".repeat(width.saturating_sub(UnicodeWidthStr::width(visible.as_str())))
+    )
 }
 
 pub fn open_ticket_ref_lengths(tickets: &[Ticket]) -> BTreeMap<uuid::Uuid, usize> {
@@ -1205,6 +1230,8 @@ mod tests {
     #[test]
     fn reviews_table_uses_compact_colored_columns() {
         let rows = vec![ReviewTableRow {
+            ticket: Some("859dd6".to_string()),
+            ticket_unique_chars: 3,
             branch: "patch-based-review-versions@1779170645".to_string(),
             approvals: "3/5".to_string(),
             status: "changes-requested".to_string(),
@@ -1213,11 +1240,13 @@ mod tests {
 
         let table = strip_ansi(&reviews_table_with_width(&rows, 80));
 
+        assert!(table.contains("TicId"));
         assert!(table.contains("Branch"));
         assert!(table.contains("Rv"));
         assert!(table.contains("Status"));
         assert!(table.contains("Title"));
         assert!(!table.contains("BranchId"));
+        assert!(table.contains("859dd6"));
         assert!(table.contains("3/5"));
         assert!(table.contains("ch.req"));
         assert!(table.contains("Use patch ids"));
