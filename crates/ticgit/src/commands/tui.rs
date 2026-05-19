@@ -2343,6 +2343,7 @@ impl App {
                 Constraint::Length(review_summary_height(inner.height)),
                 Constraint::Length(1),
                 Constraint::Min(0),
+                Constraint::Length(1),
             ])
             .split(inner);
         frame.render_widget(
@@ -2398,6 +2399,13 @@ impl App {
             .highlight_symbol(HIGHLIGHT_SYMBOL)
             .highlight_spacing(HighlightSpacing::Always);
         frame.render_stateful_widget(list, rows_area[2], &mut self.review_commit_state);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Enter opens selected commit, Esc returns to review summary",
+                Style::default().fg(Color::DarkGray),
+            ))),
+            rows_area[3],
+        );
     }
 
     fn draw_review_commit_preview(
@@ -2420,6 +2428,7 @@ impl App {
             .map(|info| info.subject.as_str())
             .filter(|subject| !subject.is_empty())
             .unwrap_or("metadata not loaded");
+        let (reviewed, approved) = review_commit_counts(review, &sha, &status);
         let mut lines = vec![
             Line::from(vec![
                 Span::styled(
@@ -2436,7 +2445,11 @@ impl App {
                     },
                 ),
             ]),
-            review_commit_status_line(&status),
+            approval_progress_line(
+                approved,
+                reviewed.max(approved).max(1),
+                usize::from(area.width).saturating_sub(2),
+            ),
         ];
         if let Some(info) = info {
             lines.push(field_line("Author", &info.author));
@@ -9226,7 +9239,6 @@ fn non_empty(value: &str) -> Option<String> {
 
 fn review_branch_label(review: &TicketReview) -> String {
     match review.branch_name.as_deref() {
-        Some(name) if name != review.branch_id => format!("{name} ({})", review.branch_id),
         Some(name) => name.to_string(),
         None => review.branch_id.clone(),
     }
@@ -9487,8 +9499,8 @@ fn review_messages_for_commit<'a>(
 }
 
 fn review_summary_height(area_height: u16) -> u16 {
-    if area_height >= 11 {
-        8
+    if area_height >= 9 {
+        6
     } else {
         area_height.saturating_sub(2).clamp(0, 5)
     }
@@ -9571,11 +9583,6 @@ fn review_branch_summary_lines(
             [("Desc", description, Style::default().fg(Color::Reset))],
             width,
         ),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "Enter opens selected commit, Esc returns to review summary",
-            Style::default().fg(Color::DarkGray),
-        )),
     ]
 }
 
@@ -9640,13 +9647,26 @@ fn review_summary_table_line<const N: usize>(
 }
 
 fn review_review_progress_line(progress: ReviewProgress, width: usize) -> Line<'static> {
-    let mut spans = progress_segment(
-        "ap",
-        progress.approved,
-        progress.total,
+    approval_progress_line(progress.approved, progress.total, width)
+}
+
+fn approval_progress_line(approved: usize, total: usize, width: usize) -> Line<'static> {
+    let fixed_width = 13 + UnicodeWidthStr::width(format!("{approved}/{total} ").as_str());
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<10}", "Approvals"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" : ", Style::default().fg(Color::DarkGray)),
+    ];
+    spans.extend(progress_segment(
+        approved,
+        total,
         Color::LightGreen,
-        24.min(width.saturating_sub(8).max(8)),
-    );
+        24.min(width.saturating_sub(fixed_width).max(8)),
+    ));
     let used = spans_width(&spans);
     if used < width {
         spans.push(Span::raw(" ".repeat(width - used)));
@@ -9661,7 +9681,6 @@ fn review_review_progress_line(progress: ReviewProgress, width: usize) -> Line<'
 }
 
 fn progress_segment(
-    label: &str,
     count: usize,
     total: usize,
     color: Color,
@@ -9674,12 +9693,6 @@ fn progress_segment(
     }
     .min(bar_width);
     vec![
-        Span::styled(
-            format!("{label} "),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
         Span::styled(
             format!("{count}/{total} "),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
@@ -10187,27 +10200,6 @@ fn review_revision_patch(
         })
         .unwrap_or(entry.sha.as_str())
         .to_string()
-}
-
-fn review_commit_status_line(status: &CommitReviewStatus) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("{:<10}", "Status"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" : ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!(
-                "reviewed {}  approved {}  signed-off {}",
-                status.reviewed.len(),
-                status.approvals.len(),
-                status.signed_off.len()
-            ),
-            Style::default().fg(Color::Cyan),
-        ),
-    ])
 }
 
 fn review_message_line(message: &ReviewMessageView, width: usize) -> Line<'static> {
@@ -13932,7 +13924,8 @@ mod tests {
             .collect::<String>();
 
         assert!(spans_width(&line.spans) <= 78);
-        assert!(text.contains("ap 3/20"));
+        assert!(text.contains("Approvals"));
+        assert!(text.contains("3/20"));
         assert!(!text.contains("rv"));
         assert!(text.contains("█"));
     }
@@ -14177,7 +14170,8 @@ mod tests {
             .collect::<String>();
 
         assert!(text.contains("Review CLI"));
-        assert!(text.contains("Branch  : review-cli (review-cli@123)"));
+        assert!(text.contains("Branch  : review-cli"));
+        assert!(!text.contains("review-cli@123"));
         assert!(text.contains("Ticket  : 000"));
         assert!(text.contains("Status  : open"));
         assert!(!text.contains("Head"));
