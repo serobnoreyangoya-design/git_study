@@ -1830,8 +1830,11 @@ impl App {
             .map(|ticket| (ticket.id, ticket))
             .collect::<HashMap<_, _>>();
 
-        let items: Vec<ListItem<'_>> = self
-            .list_ticket_indices()
+        let list_indices = self.list_ticket_indices();
+        let priority_styles =
+            issue_priority_styles(list_indices.iter().map(|idx| &self.tickets[*idx]));
+
+        let items: Vec<ListItem<'_>> = list_indices
             .iter()
             .map(|&idx| {
                 let ticket = &self.tickets[idx];
@@ -1846,6 +1849,7 @@ impl App {
                     self.store.email(),
                     self.closed_at.get(&ticket.id).copied(),
                     !self.linked_writeups(ticket.id).is_empty(),
+                    &priority_styles,
                 ))
             })
             .collect();
@@ -11597,6 +11601,7 @@ fn ticket_table_line(
     current_user: &str,
     closed_at: Option<OffsetDateTime>,
     has_writeups: bool,
+    priority_styles: &BTreeMap<i64, Style>,
 ) -> Line<'static> {
     let mut spans = Vec::new();
     for (idx, (column, column_width)) in columns.iter().zip(widths).enumerate() {
@@ -11614,6 +11619,10 @@ fn ticket_table_line(
             IssueColumn::Title => {
                 push_issue_title_column(&mut spans, ticket, *column_width, title_prefix);
             }
+            IssueColumn::Priority => {
+                let (value, style) = issue_priority_column_value(ticket, priority_styles);
+                spans.push(Span::styled(fit_display(&value, *column_width), style));
+            }
             _ => {
                 let (value, style) = issue_column_value(ticket, *column, closed_at, current_user);
                 spans.push(Span::styled(fit_display(&value, *column_width), style));
@@ -11630,6 +11639,82 @@ fn ticket_table_line(
     }
 
     Line::from(spans)
+}
+
+fn issue_priority_styles<'a>(tickets: impl Iterator<Item = &'a Ticket>) -> BTreeMap<i64, Style> {
+    let priorities = tickets
+        .filter_map(|ticket| ticket.priority)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let total = priorities.len();
+    priorities
+        .into_iter()
+        .enumerate()
+        .map(|(idx, priority)| {
+            (
+                priority,
+                Style::default()
+                    .fg(issue_priority_color(idx, total))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect()
+}
+
+fn issue_priority_color(index: usize, total: usize) -> Color {
+    const PRIORITY_COLORS: [Color; 12] = [
+        Color::LightRed,
+        Color::LightYellow,
+        Color::LightGreen,
+        Color::LightCyan,
+        Color::LightBlue,
+        Color::LightMagenta,
+        Color::Yellow,
+        Color::Green,
+        Color::Cyan,
+        Color::Blue,
+        Color::Magenta,
+        Color::Gray,
+    ];
+    if total <= PRIORITY_COLORS.len() {
+        return PRIORITY_COLORS[index % PRIORITY_COLORS.len()];
+    }
+
+    let hue = (index as f64 / total.max(1) as f64) * 360.0;
+    let chroma = 0.66;
+    let value = 0.95;
+    let x = chroma * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hue as u16 {
+        0..=59 => (chroma, x, 0.0),
+        60..=119 => (x, chroma, 0.0),
+        120..=179 => (0.0, chroma, x),
+        180..=239 => (0.0, x, chroma),
+        240..=299 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let m = value - chroma;
+    Color::Rgb(
+        ((r1 + m) * 255.0) as u8,
+        ((g1 + m) * 255.0) as u8,
+        ((b1 + m) * 255.0) as u8,
+    )
+}
+
+fn issue_priority_column_value(
+    ticket: &Ticket,
+    priority_styles: &BTreeMap<i64, Style>,
+) -> (String, Style) {
+    let Some(priority) = ticket.priority else {
+        return (String::new(), Style::default().fg(Color::Magenta));
+    };
+    (
+        format!("p{priority}"),
+        priority_styles
+            .get(&priority)
+            .copied()
+            .unwrap_or_else(|| Style::default().fg(Color::Magenta)),
+    )
 }
 
 fn push_issue_id_column(
@@ -13628,6 +13713,34 @@ mod tests {
 
         assert_eq!(spans_width(&spans), 8);
         assert!(spans.iter().any(|span| span.content.as_ref() == "bug"));
+    }
+
+    #[test]
+    fn issue_priorities_get_distinct_visible_colors() {
+        let mut first = test_ticket(uuid::Uuid::from_u128(1), None, &[]);
+        first.priority = Some(1);
+        let mut second = test_ticket(uuid::Uuid::from_u128(2), None, &[]);
+        second.priority = Some(2);
+        let styles = issue_priority_styles([&first, &second].into_iter());
+
+        assert_ne!(styles.get(&1).unwrap().fg, styles.get(&2).unwrap().fg);
+
+        let line = ticket_table_line(
+            &first,
+            &[IssueColumn::Priority, IssueColumn::Title],
+            &[LIST_PRIORITY_WIDTH, 20],
+            24,
+            "",
+            false,
+            "test@example.com",
+            None,
+            false,
+            &styles,
+        );
+
+        assert!(line.spans.iter().any(|span| {
+            span.content.as_ref().trim() == "p1" && span.style.fg == styles.get(&1).unwrap().fg
+        }));
     }
 
     #[test]
