@@ -9654,7 +9654,7 @@ fn approval_progress_line(approved: usize, total: usize, width: usize) -> Line<'
     let fixed_width = 13 + UnicodeWidthStr::width(format!("{approved}/{total} ").as_str());
     let mut spans = vec![
         Span::styled(
-            format!("{:<10}", "Approvals"),
+            format!("{:<10}", "Review"),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -13924,7 +13924,7 @@ mod tests {
             .collect::<String>();
 
         assert!(spans_width(&line.spans) <= 78);
-        assert!(text.contains("Approvals"));
+        assert!(text.contains("Review"));
         assert!(text.contains("3/20"));
         assert!(!text.contains("rv"));
         assert!(text.contains("█"));
