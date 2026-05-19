@@ -237,6 +237,7 @@ fn run_promote(args: PromoteArgs) -> Result<()> {
     let store = open_store()?;
     let id = store.resolve_writeup_id(&args.id)?;
     let ticket = store.promote_writeup(&id)?;
+    store.set_writeup_status(&id, WriteupStatus::Closed)?;
     println!(
         "Promoted writeup {} to ticket {} ({})",
         &id.to_string()[..6],

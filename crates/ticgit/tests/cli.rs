@@ -98,6 +98,11 @@ fn review_cli_records_branch_review_flow() {
         .args(["review", "list", "--status", "open"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("BranchId").not())
+        .stdout(predicate::str::contains("Rv"))
+        .stdout(predicate::str::contains("TicId"))
+        .stdout(predicate::str::contains(&ticket_id[..1]))
+        .stdout(predicate::str::contains(&ticket_id[1..6]))
         .stdout(predicate::str::contains("main"))
         .stdout(predicate::str::contains("open"))
         .stdout(predicate::str::contains("Stable review title"));
@@ -126,7 +131,35 @@ fn review_cli_records_branch_review_flow() {
         .stdout(predicate::str::contains(
             "Description: Stable review description",
         ))
+        .stdout(predicate::str::contains("::"))
         .stdout(predicate::str::contains("Last commit message").not());
+
+    repo.ti()
+        .args(["review", "show", &ticket_id])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Tickets:"))
+        .stdout(predicate::str::contains(&ticket_id[..6]))
+        .stdout(predicate::str::contains("Stable review title"));
+
+    let review_json = repo
+        .ti()
+        .args(["review", "show", &ticket_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let review_json: Value = serde_json::from_slice(&review_json).unwrap();
+    assert_eq!(review_json["title"], "Stable review title");
+    assert_eq!(review_json["ticket_ref"], &ticket_id[..6]);
+
+    repo.ti()
+        .args(["review", "show", &ticket_id, "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Review: Stable review title"))
+        .stdout(predicate::str::contains("- Ticket:"));
 
     repo.ti()
         .args(["review", "add-reviewer", "bob@example.com"])
@@ -166,6 +199,39 @@ fn review_cli_records_branch_review_flow() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Integrated main@"));
+
+    repo.ti()
+        .args(["review", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No open reviews"))
+        .stdout(predicate::str::contains("Stable review title").not());
+
+    repo.ti()
+        .args(["review", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stable review title"))
+        .stdout(predicate::str::contains("merged"));
+
+    let list_json = repo
+        .ti()
+        .args(["review", "list", "--all", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_json: Value = serde_json::from_slice(&list_json).unwrap();
+    assert_eq!(list_json[0]["title"], "Stable review title");
+    assert_eq!(list_json[0]["ticket_ref"], &ticket_id[..6]);
+
+    repo.ti()
+        .args(["review", "list", "--all", "--markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("# Reviews"))
+        .stdout(predicate::str::contains("Stable review title"));
 
     repo.ti()
         .args(["review", "show"])
@@ -1299,6 +1365,11 @@ fn writeup_workflow_creates_versions_links_and_promotes() {
         .stdout(predicate::str::contains("review"))
         .stdout(predicate::str::contains("Second notes"));
 
+    repo.ti()
+        .args(["writeup", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Rethink sync").not());
     repo.ti()
         .args(["writeup", "close", writeup_prefix])
         .assert()

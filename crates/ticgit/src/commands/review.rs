@@ -1,4 +1,5 @@
-use std::process::Command;
+use std::collections::BTreeSet;
+use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -8,6 +9,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::commands::open_store;
+use crate::render::{self, open_ticket_ref_lengths, ReviewTableRow};
 
 const REVIEW_INDEX_KEY: &str = "review:branches";
 
@@ -68,15 +70,35 @@ pub struct NewArgs {
 
 #[derive(Debug, Parser)]
 pub struct ListArgs {
+    /// Show all reviews, including closed and merged reviews.
+    #[arg(long)]
+    pub all: bool,
+
     /// Only show reviews with this status.
     #[arg(long)]
     pub status: Option<String>,
+
+    /// Output as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Output as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 #[derive(Debug, Parser)]
 pub struct ShowArgs {
     /// Branch name or branch-id. Defaults to the current branch.
     pub review: Option<String>,
+
+    /// Output as JSON.
+    #[arg(long = "json")]
+    pub json: bool,
+
+    /// Output as Markdown.
+    #[arg(long = "markdown", conflicts_with = "json")]
+    pub markdown: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -143,7 +165,7 @@ pub struct IntegrateArgs {
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewMessage {
     author: String,
     body: String,
@@ -155,19 +177,40 @@ struct ReviewMessage {
     path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lines: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewRevisionChange {
     sha: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     change_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch_id: Option<String>,
 }
 
 #[derive(Debug)]
 struct ReviewRef {
     branch_id: String,
-    branch_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReviewOutput {
+    branch_id: String,
+    branch: String,
+    ticket_id: Option<String>,
+    ticket_ref: Option<String>,
+    title: String,
+    description: String,
+    status: String,
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    integration_sha: Option<String>,
+    reviewers: Vec<String>,
+    revisions: Vec<ReviewRevisionChange>,
+    messages: Vec<ReviewMessage>,
+    approvals: String,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -241,79 +284,324 @@ fn list(args: ListArgs) -> Result<()> {
     let project = store.session().target(&Target::project());
     let ids = string_set(project.get_value(REVIEW_INDEX_KEY)?);
     if ids.is_empty() {
-        println!("No reviews");
+        if args.json {
+            println!("[]");
+        } else if args.markdown {
+            println!("{}", reviews_markdown(&[]));
+        } else {
+            println!("No reviews");
+        }
         return Ok(());
     }
 
-    println!("{:<28} {:<17} {:<12} Title", "BranchId", "Branch", "Status");
+    let all_tickets = store.list()?;
+    let ref_lengths = open_ticket_ref_lengths(&all_tickets);
+    let mut rows = Vec::new();
+    let mut outputs = Vec::new();
     for branch_id in ids {
-        let target = store.session().target(&Target::branch(&branch_id));
-        let status = string_value(target.get_value("status")?).unwrap_or_else(|| "unknown".into());
-        if args
-            .status
-            .as_deref()
-            .is_some_and(|wanted| wanted != status)
-        {
+        let output = review_output_for_branch(&store, &branch_id, &all_tickets, &ref_lengths)?;
+        if should_skip_review_list_row(&args, &output.status) {
             continue;
         }
-        let title = string_value(target.get_value("title")?).unwrap_or_default();
-        let branch = string_value(target.get_value("code:branch")?).unwrap_or_default();
-        println!("{:<28} {:<17} {:<12} {}", branch_id, branch, status, title);
+        rows.push(ReviewTableRow {
+            ticket: output.ticket_ref.clone(),
+            ticket_unique_chars: output
+                .ticket_id
+                .as_deref()
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .and_then(|id| ref_lengths.get(&id).copied())
+                .unwrap_or(6),
+            branch: output.branch.clone(),
+            status: output.status.clone(),
+            title: output.title.clone(),
+            approvals: output.approvals.clone(),
+        });
+        outputs.push(output);
+    }
+
+    if rows.is_empty() {
+        if args.json {
+            println!("[]");
+        } else if args.markdown {
+            println!("{}", reviews_markdown(&[]));
+        } else if let Some(status) = args.status.as_deref() {
+            println!("No reviews with status `{status}`");
+        } else if args.all {
+            println!("No reviews");
+        } else {
+            println!("No open reviews");
+        }
+        return Ok(());
+    }
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&outputs)?);
+    } else if args.markdown {
+        println!("{}", reviews_markdown(&outputs));
+    } else {
+        print!("{}", render::reviews_table(&rows));
     }
     Ok(())
+}
+
+fn should_skip_review_list_row(args: &ListArgs, status: &str) -> bool {
+    if let Some(wanted) = args.status.as_deref() {
+        return wanted != status;
+    }
+    !args.all && matches!(status, "closed" | "merged")
+}
+
+#[derive(Debug, Default)]
+struct CommitReviewStatus {
+    reviewed: BTreeSet<String>,
+    approvals: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct ReviewProgress {
+    reviewed: usize,
+    approved: usize,
+    total: usize,
+}
+
+fn review_progress(
+    store: &ticgit_lib::TicketStore,
+    commits: &[String],
+    messages: &[ReviewMessage],
+) -> ReviewProgress {
+    let mut progress = ReviewProgress {
+        total: commits.len(),
+        ..Default::default()
+    };
+    for sha in commits {
+        let status = commit_review_status(store, sha);
+        let (reviewed, approved) = review_commit_counts(sha, &status, messages);
+        if reviewed > 0 {
+            progress.reviewed += 1;
+        }
+        if approved > 0 {
+            progress.approved += 1;
+        }
+    }
+    progress
+}
+
+fn review_progress_label(approved: usize, total: usize) -> String {
+    if approved == 0 {
+        format!("-/{total}")
+    } else {
+        format!("{approved}/{total}")
+    }
+}
+
+fn commit_review_status(store: &ticgit_lib::TicketStore, sha: &str) -> CommitReviewStatus {
+    let Ok(target) = Target::commit(sha) else {
+        return CommitReviewStatus::default();
+    };
+    let handle = store.session().target(&target);
+    CommitReviewStatus {
+        reviewed: meta_set(handle.get_value("review:reviewed").ok().flatten()),
+        approvals: meta_set(handle.get_value("review:approvals").ok().flatten()),
+    }
+}
+
+fn review_commit_counts(
+    sha: &str,
+    status: &CommitReviewStatus,
+    messages: &[ReviewMessage],
+) -> (usize, usize) {
+    let mut reviewed = status.reviewed.clone();
+    let mut approvals = status.approvals.clone();
+    for message in messages.iter().filter(|message| {
+        message.commit.as_deref().is_some_and(|commit| {
+            commit == sha || sha.starts_with(commit) || commit.starts_with(sha)
+        })
+    }) {
+        match message.message_type.as_str() {
+            "approval" => {
+                reviewed.insert(message.author.clone());
+                approvals.insert(message.author.clone());
+            }
+            "changes-requested" | "comment" => {
+                reviewed.insert(message.author.clone());
+            }
+            _ => {}
+        }
+    }
+    (reviewed.len(), approvals.len())
+}
+
+fn review_output_for_branch(
+    store: &ticgit_lib::TicketStore,
+    branch_id: &str,
+    all_tickets: &[ticgit_lib::Ticket],
+    ref_lengths: &std::collections::BTreeMap<uuid::Uuid, usize>,
+) -> Result<ReviewOutput> {
+    let target = store.session().target(&Target::branch(branch_id));
+    let branch = string_value(target.get_value("code:branch")?).unwrap_or_else(|| branch_id.into());
+    let ticket_id = string_set(target.get_value("issue:id")?)
+        .into_iter()
+        .filter_map(|id| uuid::Uuid::parse_str(&id).ok())
+        .next();
+    let ticket_ref = ticket_id.and_then(|id| {
+        all_tickets
+            .iter()
+            .find(|ticket| ticket.id == id)
+            .map(|ticket| {
+                let len = ref_lengths.get(&ticket.id).copied().unwrap_or(6).max(6);
+                ticket.id.to_string().replace('-', "")[..len].to_string()
+            })
+    });
+    let ticket_id = ticket_id.map(|id| id.to_string());
+    let revisions = target
+        .list_entries("review:revisions")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
+        .collect::<Vec<_>>();
+    let commits = revisions
+        .iter()
+        .map(|entry| entry.sha.clone())
+        .collect::<Vec<_>>();
+    let messages = target
+        .list_entries("review:messages")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| serde_json::from_str::<ReviewMessage>(&entry.value).ok())
+        .collect::<Vec<_>>();
+    let progress = review_progress(store, &commits, &messages);
+    Ok(ReviewOutput {
+        branch_id: branch_id.to_string(),
+        branch,
+        ticket_id,
+        ticket_ref,
+        title: string_value(target.get_value("title")?).unwrap_or_default(),
+        description: string_value(target.get_value("description")?).unwrap_or_default(),
+        status: string_value(target.get_value("status")?).unwrap_or_else(|| "unknown".into()),
+        base_sha: string_value(target.get_value("base:sha")?),
+        head_sha: string_value(target.get_value("head:sha")?),
+        integration_sha: string_value(target.get_value("integration:sha")?),
+        reviewers: string_set(target.get_value("review:reviewers")?),
+        revisions,
+        messages,
+        approvals: review_progress_label(progress.approved, progress.total),
+    })
+}
+
+fn reviews_markdown(reviews: &[ReviewOutput]) -> String {
+    let mut out = format!("# Reviews\n\n- Count: {}\n\n", reviews.len());
+    out.push_str("| Ticket | Branch | Review | Status | Title |\n");
+    out.push_str("|---|---|---:|---|---|\n");
+    for review in reviews {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            review.ticket_ref.as_deref().unwrap_or(""),
+            markdown_cell(&review.branch),
+            review.approvals,
+            markdown_cell(&review.status),
+            markdown_cell(&review.title)
+        ));
+    }
+    out
+}
+
+fn review_markdown(review: &ReviewOutput) -> String {
+    let mut out = format!("# Review: {}\n\n", review.title);
+    out.push_str(&format!("- Branch: `{}`\n", review.branch));
+    if let Some(ticket_ref) = review.ticket_ref.as_deref() {
+        out.push_str(&format!("- Ticket: `{ticket_ref}`\n"));
+    }
+    out.push_str(&format!("- Status: `{}`\n", review.status));
+    out.push_str(&format!("- Approvals: `{}`\n", review.approvals));
+    if !review.description.is_empty() {
+        out.push_str("\n## Description\n\n");
+        out.push_str(&review.description);
+        out.push('\n');
+    }
+    if !review.revisions.is_empty() {
+        out.push_str("\n## Revisions\n\n");
+        for revision in &review.revisions {
+            out.push_str(&format!("- `{}`\n", format_review_revision(revision)));
+        }
+    }
+    if !review.messages.is_empty() {
+        out.push_str("\n## Messages\n\n");
+        for message in &review.messages {
+            out.push_str(&format!(
+                "- **{}** {}{}: {}\n",
+                markdown_cell(&message.message_type),
+                markdown_cell(&message.author),
+                message_location(message),
+                markdown_cell(&message.body)
+            ));
+        }
+    }
+    out
+}
+
+fn markdown_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
 }
 
 fn show(args: ShowArgs) -> Result<()> {
     let store = open_store()?;
     let review = resolve_review(&store, args.review.as_deref())?;
-    let target = store.session().target(&Target::branch(&review.branch_id));
-    println!("Review: {}", review.branch_id);
-    if let Some(branch) = review.branch_name {
-        println!("Branch: {branch}");
+    let all_tickets = store.list()?;
+    let ref_lengths = open_ticket_ref_lengths(&all_tickets);
+    let output = review_output_for_branch(&store, &review.branch_id, &all_tickets, &ref_lengths)?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
     }
-    for (label, key) in [
-        ("Title", "title"),
-        ("Description", "description"),
-        ("Status", "status"),
-        ("Base", "base:sha"),
-        ("Head", "head:sha"),
-        ("Integration", "integration:sha"),
+    if args.markdown {
+        println!("{}", review_markdown(&output));
+        return Ok(());
+    }
+
+    println!("Review: {}", output.branch_id);
+    println!("Branch: {}", output.branch);
+    if let Some(ticket_ref) = output.ticket_ref.as_deref() {
+        println!("Tickets: {ticket_ref}");
+    }
+    for (label, value) in [
+        ("Title", output.title.as_str()),
+        ("Description", output.description.as_str()),
+        ("Status", output.status.as_str()),
+        ("Approvals", output.approvals.as_str()),
     ] {
-        if let Some(value) = string_value(target.get_value(key)?) {
-            if !value.is_empty() {
-                println!("{label}: {value}");
-            }
+        if !value.is_empty() {
+            println!("{label}: {value}");
         }
     }
-    for (label, key) in [("Tickets", "issue:id"), ("Reviewers", "review:reviewers")] {
-        let values = string_set(target.get_value(key)?);
-        if !values.is_empty() {
-            println!("{label}: {}", values.join(", "));
+    for (label, value) in [
+        ("Base", output.base_sha.as_deref()),
+        ("Head", output.head_sha.as_deref()),
+        ("Integration", output.integration_sha.as_deref()),
+    ] {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            println!("{label}: {value}");
         }
+    }
+    if !output.reviewers.is_empty() {
+        println!("Reviewers: {}", output.reviewers.join(", "));
     }
 
-    let revisions = target.list_entries("review:revisions").unwrap_or_default();
-    if !revisions.is_empty() {
+    if !output.revisions.is_empty() {
         println!("Revisions:");
-        for entry in revisions {
-            println!("  {}", entry.value);
+        for entry in &output.revisions {
+            println!("  {}", format_review_revision(entry));
         }
     }
 
-    let messages = target.list_entries("review:messages").unwrap_or_default();
-    if !messages.is_empty() {
+    if !output.messages.is_empty() {
         println!("Messages:");
-        for entry in messages {
-            match serde_json::from_str::<ReviewMessage>(&entry.value) {
-                Ok(message) => {
-                    let location = message_location(&message);
-                    println!(
-                        "  [{}] {}{}: {}",
-                        message.message_type, message.author, location, message.body
-                    );
-                }
-                Err(_) => println!("  {}", entry.value),
-            }
+        for message in &output.messages {
+            let location = message_location(message);
+            println!(
+                "  [{}] {}{}: {}",
+                message.message_type, message.author, location, message.body
+            );
         }
     }
     Ok(())
@@ -348,6 +636,7 @@ fn comment(args: CommentArgs) -> Result<()> {
             commit: args.commit,
             path: args.path,
             lines,
+            at: None,
         },
     )?;
     println!("Added comment to {}", review.branch_id);
@@ -383,6 +672,7 @@ fn approve(args: ApproveArgs) -> Result<()> {
                 commit,
                 path: None,
                 lines: None,
+                at: None,
             },
         )?;
         println!("Approved {}", review.branch_id);
@@ -410,6 +700,7 @@ fn request_changes(args: RequestChangesArgs) -> Result<()> {
             commit: None,
             path: None,
             lines: None,
+            at: None,
         },
     )?;
     println!("Requested changes on {}", review.branch_id);
@@ -468,21 +759,25 @@ fn resolve_review(store: &ticgit_lib::TicketStore, explicit: Option<&str>) -> Re
         Some(name) => name.to_string(),
         None => current_branch()?,
     };
+    if let Ok(ticket_id) = store.resolve_id(&name) {
+        if let Some(branch_id) = string_value(
+            store
+                .session()
+                .target(&Target::project())
+                .get_value(&keys::ticket_field(&ticket_id, "branch-id"))?,
+        ) {
+            return Ok(ReviewRef { branch_id });
+        }
+    }
+
     let branch_target = store.session().target(&Target::branch(&name));
     if let Some(branch_id) = string_value(branch_target.get_value("branch-id")?) {
-        return Ok(ReviewRef {
-            branch_id,
-            branch_name: Some(name),
-        });
+        return Ok(ReviewRef { branch_id });
     }
 
     let review_target = store.session().target(&Target::branch(&name));
     if review_target.get_value("status")?.is_some() || review_target.get_value("title")?.is_some() {
-        let branch_name = string_value(review_target.get_value("code:branch")?);
-        return Ok(ReviewRef {
-            branch_id: name,
-            branch_name,
-        });
+        return Ok(ReviewRef { branch_id: name });
     }
 
     bail!("no review metadata found for `{name}`; run `ti review new` first")
@@ -511,8 +806,11 @@ fn index_review(store: &ticgit_lib::TicketStore, branch_id: &str) -> Result<()> 
 fn append_message(
     store: &ticgit_lib::TicketStore,
     branch_id: &str,
-    message: ReviewMessage,
+    mut message: ReviewMessage,
 ) -> Result<()> {
+    if message.at.is_none() {
+        message.at = Some(now_rfc3339()?);
+    }
     let json = serde_json::to_string(&message)?;
     store
         .session()
@@ -532,12 +830,16 @@ fn refresh_revisions(
         .list_entries("review:revisions")
         .unwrap_or_default()
         .into_iter()
-        .map(|entry| entry.value)
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
         .collect::<Vec<_>>();
     let commits = revision_list(base_sha, head_sha)?;
+    let commits = commits
+        .iter()
+        .map(|sha| review_revision_change_for_commit(store, sha))
+        .collect::<Result<Vec<_>>>()?;
     target.remove("review:revisions")?;
-    for sha in &commits {
-        target.list_push("review:revisions", &sha)?;
+    for entry in &commits {
+        target.list_push("review:revisions", &format_review_revision(entry))?;
     }
     append_revision_change_history(store, branch_id, &previous)?;
     append_revision_change_history(store, branch_id, &commits)?;
@@ -547,28 +849,86 @@ fn refresh_revisions(
 fn append_revision_change_history(
     store: &ticgit_lib::TicketStore,
     branch_id: &str,
-    commits: &[String],
+    commits: &[ReviewRevisionChange],
 ) -> Result<()> {
     let target = store.session().target(&Target::branch(branch_id));
-    let mut seen = target
+    let mut history = target
         .list_entries("review:revision-history")
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|entry| serde_json::from_str::<ReviewRevisionChange>(&entry.value).ok())
-        .map(|entry| entry.sha)
+        .filter_map(|entry| parse_review_revision_change(&entry.value))
+        .collect::<Vec<_>>();
+
+    let mut changed = false;
+    for entry in &mut history {
+        if entry.patch_id.is_none() {
+            entry.patch_id = ensure_commit_patch_id(store, &entry.sha)?;
+            changed |= entry.patch_id.is_some();
+        }
+    }
+
+    let mut seen = history
+        .iter()
+        .map(|entry| entry.sha.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    for sha in commits.iter().rev() {
-        if seen.insert(sha.clone()) {
-            target.list_push(
-                "review:revision-history",
-                &serde_json::to_string(&ReviewRevisionChange {
-                    sha: sha.clone(),
-                    change_id: commit_change_id(sha),
-                })?,
-            )?;
+    for entry in commits.iter().rev() {
+        if seen.insert(entry.sha.clone()) {
+            history.push(entry.clone());
+            changed = true;
+        }
+    }
+
+    if changed {
+        target.remove("review:revision-history")?;
+        for entry in history {
+            target.list_push("review:revision-history", &serde_json::to_string(&entry)?)?;
         }
     }
     Ok(())
+}
+
+fn review_revision_change_for_commit(
+    store: &ticgit_lib::TicketStore,
+    sha: &str,
+) -> Result<ReviewRevisionChange> {
+    Ok(ReviewRevisionChange {
+        sha: sha.to_string(),
+        change_id: commit_change_id(sha),
+        patch_id: ensure_commit_patch_id(store, sha)?,
+    })
+}
+
+fn format_review_revision(entry: &ReviewRevisionChange) -> String {
+    format!(
+        "{}:{}:{}",
+        entry.sha,
+        entry.change_id.as_deref().unwrap_or_default(),
+        entry.patch_id.as_deref().unwrap_or_default()
+    )
+}
+
+fn parse_review_revision_change(value: &str) -> Option<ReviewRevisionChange> {
+    if let Ok(entry) = serde_json::from_str::<ReviewRevisionChange>(value) {
+        return Some(entry);
+    }
+
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some((sha, rest)) = value.split_once(':') {
+        let (change_id, patch_id) = rest.split_once(':').unwrap_or((rest, ""));
+        return Some(ReviewRevisionChange {
+            sha: sha.to_string(),
+            change_id: non_empty(change_id),
+            patch_id: non_empty(patch_id),
+        });
+    }
+    Some(ReviewRevisionChange {
+        sha: value.to_string(),
+        change_id: None,
+        patch_id: None,
+    })
 }
 
 fn revision_list(base_sha: &str, head_sha: &str) -> Result<Vec<String>> {
@@ -611,6 +971,40 @@ fn commit_change_id(sha: &str) -> Option<String> {
         .lines()
         .take_while(|line| !line.is_empty())
         .find_map(|line| line.strip_prefix("change-id ").map(str::to_string))
+}
+
+fn ensure_commit_patch_id(store: &ticgit_lib::TicketStore, sha: &str) -> Result<Option<String>> {
+    let target = store.session().target(&Target::commit(sha)?);
+    if let Some(patch_id) = string_value(target.get_value("patch-id")?) {
+        return Ok(Some(patch_id));
+    }
+    let Some(patch_id) = commit_patch_id(sha) else {
+        return Ok(None);
+    };
+    target.set("patch-id", patch_id.as_str())?;
+    Ok(Some(patch_id))
+}
+
+fn commit_patch_id(sha: &str) -> Option<String> {
+    let mut diff = Command::new("git")
+        .args(["diff-tree", "--patch", sha])
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let stdout = diff.stdout.take()?;
+    let patch_id = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::from(stdout))
+        .output()
+        .ok()?;
+    let _ = diff.wait();
+    if !patch_id.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&patch_id.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
 }
 
 fn default_base_ref() -> String {
@@ -662,6 +1056,18 @@ fn string_set(value: Option<MetaValue>) -> Vec<String> {
         Some(MetaValue::String(value)) if !value.is_empty() => vec![value],
         _ => Vec::new(),
     }
+}
+
+fn meta_set(value: Option<MetaValue>) -> BTreeSet<String> {
+    match value {
+        Some(MetaValue::Set(values)) => values,
+        Some(MetaValue::String(value)) if !value.is_empty() => BTreeSet::from([value]),
+        _ => BTreeSet::new(),
+    }
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn split_optional_review_arg(args: Vec<String>) -> Result<(Option<String>, String)> {
