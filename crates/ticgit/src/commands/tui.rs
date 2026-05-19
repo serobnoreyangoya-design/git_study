@@ -7002,9 +7002,7 @@ impl App {
     }
 
     fn hide_review_tickets_in_issue_list(&self) -> bool {
-        self.active_tab == TuiTab::Issues
-            && self.base_status == Some(TicketStatus::Open)
-            && self.base_state.is_none()
+        should_hide_review_tickets_in_issue_list(self.base_status, self.base_state)
     }
 
     fn apply_writeup_filter(&mut self) {
@@ -12865,6 +12863,13 @@ fn saved_view_tags(view: &SavedView) -> Vec<String> {
     view.tag.iter().cloned().collect()
 }
 
+fn should_hide_review_tickets_in_issue_list(
+    base_status: Option<TicketStatus>,
+    base_state: Option<TicketState>,
+) -> bool {
+    base_status == Some(TicketStatus::Open) && base_state.is_none()
+}
+
 fn builtin_views(current_user: &str) -> Vec<ViewEntry> {
     vec![
         ViewEntry {
@@ -13883,6 +13888,23 @@ mod tests {
             let view = views.iter().find(|view| view.name == name).unwrap();
             assert!(!view.view.subissues, "{name} should hide subissues");
         }
+    }
+
+    #[test]
+    fn default_open_issue_filter_hides_review_tickets_independent_of_tab() {
+        assert!(should_hide_review_tickets_in_issue_list(
+            Some(TicketStatus::Open),
+            None
+        ));
+        assert!(!should_hide_review_tickets_in_issue_list(None, None));
+        assert!(!should_hide_review_tickets_in_issue_list(
+            Some(TicketStatus::Open),
+            Some(TicketState::Review)
+        ));
+        assert!(!should_hide_review_tickets_in_issue_list(
+            Some(TicketStatus::Closed),
+            None
+        ));
     }
 
     #[test]
