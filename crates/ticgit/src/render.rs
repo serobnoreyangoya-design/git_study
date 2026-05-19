@@ -90,6 +90,91 @@ pub fn tickets_table_with_refs(
     )
 }
 
+#[derive(Debug, Clone)]
+pub struct ReviewTableRow {
+    pub branch: String,
+    pub approvals: String,
+    pub status: String,
+    pub title: String,
+}
+
+pub fn reviews_table(rows: &[ReviewTableRow]) -> String {
+    let width = crossterm::terminal::size()
+        .map(|(columns, _)| columns as usize)
+        .unwrap_or(100)
+        .max(40);
+    reviews_table_with_width(rows, width)
+}
+
+fn reviews_table_with_width(rows: &[ReviewTableRow], width: usize) -> String {
+    let width = width.saturating_sub(1).max(1);
+    const REVIEW_WIDTH: usize = 5;
+    const STATUS_WIDTH: usize = 8;
+    const MIN_BRANCH_WIDTH: usize = 12;
+    const MAX_BRANCH_WIDTH: usize = 28;
+    const MIN_TITLE_WIDTH: usize = 12;
+
+    let natural_branch_width = rows
+        .iter()
+        .map(|row| UnicodeWidthStr::width(flatten(&row.branch).as_str()))
+        .max()
+        .unwrap_or(MIN_BRANCH_WIDTH)
+        .clamp(MIN_BRANCH_WIDTH, MAX_BRANCH_WIDTH);
+    let fixed_without_title = 2 + natural_branch_width + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1;
+    let (branch_width, title_width) = if fixed_without_title + MIN_TITLE_WIDTH <= width {
+        (
+            natural_branch_width,
+            width
+                .saturating_sub(fixed_without_title)
+                .max(MIN_TITLE_WIDTH),
+        )
+    } else {
+        let branch_width = width
+            .saturating_sub(2 + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1 + MIN_TITLE_WIDTH)
+            .clamp(MIN_BRANCH_WIDTH.min(width), natural_branch_width);
+        let fixed_without_title = 2 + branch_width + 1 + REVIEW_WIDTH + 1 + STATUS_WIDTH + 1;
+        (
+            branch_width,
+            width
+                .saturating_sub(fixed_without_title)
+                .max(MIN_TITLE_WIDTH),
+        )
+    };
+
+    let mut out = String::new();
+    let header = format!(
+        "  {} {} {} {}",
+        fit("Branch", branch_width),
+        fit("Rv", REVIEW_WIDTH),
+        fit("Status", STATUS_WIDTH),
+        fit("Title", title_width),
+    );
+    out.push_str(&ansi(ANSI_DIM, &header));
+    out.push('\n');
+    out.push_str(&ansi(ANSI_DIM, &"-".repeat(width)));
+    out.push('\n');
+
+    for row in rows {
+        out.push_str("  ");
+        out.push_str(&ansi(ANSI_CYAN, &fit(&flatten(&row.branch), branch_width)));
+        out.push(' ');
+        out.push_str(&ansi(
+            review_progress_color(&row.approvals),
+            &fit(&row.approvals, REVIEW_WIDTH),
+        ));
+        out.push(' ');
+        out.push_str(&ansi(
+            review_status_color(&row.status),
+            &fit(review_status_label(&row.status), STATUS_WIDTH),
+        ));
+        out.push(' ');
+        out.push_str(&ansi(ANSI_BLUE, &fit(&flatten(&row.title), title_width)));
+        out.push('\n');
+    }
+
+    out
+}
+
 pub fn open_ticket_ref_lengths(tickets: &[Ticket]) -> BTreeMap<uuid::Uuid, usize> {
     let open_hexes: Vec<_> = tickets
         .iter()
@@ -943,6 +1028,38 @@ fn status_color(status: &str) -> &'static str {
     }
 }
 
+fn review_status_color(status: &str) -> &'static str {
+    match status {
+        "approved" | "merged" => ANSI_GREEN,
+        "changes-requested" => "\x1b[31m",
+        "closed" => ANSI_DIM,
+        "open" => ANSI_CYAN,
+        _ => ANSI_DIM,
+    }
+}
+
+fn review_status_label(status: &str) -> &str {
+    match status {
+        "changes-requested" => "ch.req",
+        status => status,
+    }
+}
+
+fn review_progress_color(progress: &str) -> &'static str {
+    if progress.starts_with("-/") {
+        ANSI_DIM
+    } else {
+        let Some((approved, total)) = progress.split_once('/') else {
+            return ANSI_DIM;
+        };
+        match (approved.parse::<usize>(), total.parse::<usize>()) {
+            (Ok(approved), Ok(total)) if total > 0 && approved >= total => ANSI_GREEN,
+            (Ok(approved), _) if approved > 0 => ANSI_YELLOW,
+            _ => ANSI_DIM,
+        }
+    }
+}
+
 fn compact_relative_time(then: OffsetDateTime, now: OffsetDateTime) -> String {
     let label = relative_time(then, now);
     if label.len() <= 3 {
@@ -1083,6 +1200,31 @@ mod tests {
 
         assert!(lines[0].contains("TicId"));
         assert!(lines[1].starts_with("---"));
+    }
+
+    #[test]
+    fn reviews_table_uses_compact_colored_columns() {
+        let rows = vec![ReviewTableRow {
+            branch: "patch-based-review-versions@1779170645".to_string(),
+            approvals: "3/5".to_string(),
+            status: "changes-requested".to_string(),
+            title: "Use patch ids for review versions".to_string(),
+        }];
+
+        let table = strip_ansi(&reviews_table_with_width(&rows, 80));
+
+        assert!(table.contains("Branch"));
+        assert!(table.contains("Rv"));
+        assert!(table.contains("Status"));
+        assert!(table.contains("Title"));
+        assert!(!table.contains("BranchId"));
+        assert!(table.contains("3/5"));
+        assert!(table.contains("ch.req"));
+        assert!(table.contains("Use patch ids"));
+        assert!(table
+            .lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with("---")));
     }
 
     #[test]

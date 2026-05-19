@@ -98,6 +98,8 @@ fn review_cli_records_branch_review_flow() {
         .args(["review", "list", "--status", "open"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("BranchId").not())
+        .stdout(predicate::str::contains("Rv"))
         .stdout(predicate::str::contains("main"))
         .stdout(predicate::str::contains("open"))
         .stdout(predicate::str::contains("Stable review title"));
@@ -167,6 +169,20 @@ fn review_cli_records_branch_review_flow() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Integrated main@"));
+
+    repo.ti()
+        .args(["review", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No open reviews"))
+        .stdout(predicate::str::contains("Stable review title").not());
+
+    repo.ti()
+        .args(["review", "list", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stable review title"))
+        .stdout(predicate::str::contains("merged"));
 
     repo.ti()
         .args(["review", "show"])

@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -8,6 +9,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::commands::open_store;
+use crate::render::{self, ReviewTableRow};
 
 const REVIEW_INDEX_KEY: &str = "review:branches";
 
@@ -68,6 +70,10 @@ pub struct NewArgs {
 
 #[derive(Debug, Parser)]
 pub struct ListArgs {
+    /// Show all reviews, including closed and merged reviews.
+    #[arg(long)]
+    pub all: bool,
+
     /// Only show reviews with this status.
     #[arg(long)]
     pub status: Option<String>,
@@ -143,7 +149,7 @@ pub struct IntegrateArgs {
     pub args: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ReviewMessage {
     author: String,
     body: String,
@@ -249,22 +255,135 @@ fn list(args: ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<28} {:<17} {:<12} Title", "BranchId", "Branch", "Status");
+    let mut rows = Vec::new();
     for branch_id in ids {
         let target = store.session().target(&Target::branch(&branch_id));
         let status = string_value(target.get_value("status")?).unwrap_or_else(|| "unknown".into());
-        if args
-            .status
-            .as_deref()
-            .is_some_and(|wanted| wanted != status)
-        {
+        if should_skip_review_list_row(&args, &status) {
             continue;
         }
         let title = string_value(target.get_value("title")?).unwrap_or_default();
-        let branch = string_value(target.get_value("code:branch")?).unwrap_or_default();
-        println!("{:<28} {:<17} {:<12} {}", branch_id, branch, status, title);
+        let branch = string_value(target.get_value("code:branch")?).unwrap_or(branch_id);
+        let revisions = target.list_entries("review:revisions").unwrap_or_default();
+        let commits = revisions
+            .iter()
+            .filter_map(|entry| parse_review_revision_change(&entry.value).map(|entry| entry.sha))
+            .collect::<Vec<_>>();
+        let messages = target
+            .list_entries("review:messages")
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|entry| serde_json::from_str::<ReviewMessage>(&entry.value).ok())
+            .collect::<Vec<_>>();
+        let progress = review_progress(&store, &commits, &messages);
+        rows.push(ReviewTableRow {
+            branch,
+            status,
+            title,
+            approvals: review_progress_label(progress.approved, progress.total),
+        });
     }
+
+    if rows.is_empty() {
+        if let Some(status) = args.status.as_deref() {
+            println!("No reviews with status `{status}`");
+        } else if args.all {
+            println!("No reviews");
+        } else {
+            println!("No open reviews");
+        }
+        return Ok(());
+    }
+
+    print!("{}", render::reviews_table(&rows));
     Ok(())
+}
+
+fn should_skip_review_list_row(args: &ListArgs, status: &str) -> bool {
+    if let Some(wanted) = args.status.as_deref() {
+        return wanted != status;
+    }
+    !args.all && matches!(status, "closed" | "merged")
+}
+
+#[derive(Debug, Default)]
+struct CommitReviewStatus {
+    reviewed: BTreeSet<String>,
+    approvals: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct ReviewProgress {
+    reviewed: usize,
+    approved: usize,
+    total: usize,
+}
+
+fn review_progress(
+    store: &ticgit_lib::TicketStore,
+    commits: &[String],
+    messages: &[ReviewMessage],
+) -> ReviewProgress {
+    let mut progress = ReviewProgress {
+        total: commits.len(),
+        ..Default::default()
+    };
+    for sha in commits {
+        let status = commit_review_status(store, sha);
+        let (reviewed, approved) = review_commit_counts(sha, &status, messages);
+        if reviewed > 0 {
+            progress.reviewed += 1;
+        }
+        if approved > 0 {
+            progress.approved += 1;
+        }
+    }
+    progress
+}
+
+fn review_progress_label(approved: usize, total: usize) -> String {
+    if approved == 0 {
+        format!("-/{total}")
+    } else {
+        format!("{approved}/{total}")
+    }
+}
+
+fn commit_review_status(store: &ticgit_lib::TicketStore, sha: &str) -> CommitReviewStatus {
+    let Ok(target) = Target::commit(sha) else {
+        return CommitReviewStatus::default();
+    };
+    let handle = store.session().target(&target);
+    CommitReviewStatus {
+        reviewed: meta_set(handle.get_value("review:reviewed").ok().flatten()),
+        approvals: meta_set(handle.get_value("review:approvals").ok().flatten()),
+    }
+}
+
+fn review_commit_counts(
+    sha: &str,
+    status: &CommitReviewStatus,
+    messages: &[ReviewMessage],
+) -> (usize, usize) {
+    let mut reviewed = status.reviewed.clone();
+    let mut approvals = status.approvals.clone();
+    for message in messages.iter().filter(|message| {
+        message.commit.as_deref().is_some_and(|commit| {
+            commit == sha || sha.starts_with(commit) || commit.starts_with(sha)
+        })
+    }) {
+        match message.message_type.as_str() {
+            "approval" => {
+                reviewed.insert(message.author.clone());
+                approvals.insert(message.author.clone());
+            }
+            "changes-requested" | "comment" => {
+                reviewed.insert(message.author.clone());
+            }
+            _ => {}
+        }
+    }
+    (reviewed.len(), approvals.len())
 }
 
 fn show(args: ShowArgs) -> Result<()> {
@@ -767,6 +886,14 @@ fn string_set(value: Option<MetaValue>) -> Vec<String> {
         Some(MetaValue::Set(values)) => values.into_iter().collect(),
         Some(MetaValue::String(value)) if !value.is_empty() => vec![value],
         _ => Vec::new(),
+    }
+}
+
+fn meta_set(value: Option<MetaValue>) -> BTreeSet<String> {
+    match value {
+        Some(MetaValue::Set(values)) => values,
+        Some(MetaValue::String(value)) if !value.is_empty() => BTreeSet::from([value]),
+        _ => BTreeSet::new(),
     }
 }
 
