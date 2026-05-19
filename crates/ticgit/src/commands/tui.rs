@@ -2206,23 +2206,28 @@ impl App {
         let changed_file_count = self.review_changed_file_count_cached(&commits);
         let progress =
             review_commit_progress_from_status_cache(&review, &commits, &self.review_status_cache);
-        let detail_width = usize::from(area.width).saturating_sub(2);
         let current_head = self.review_current_branch_head_cached(&review);
+        let stale_head = current_head.as_deref().and_then(|current_head| {
+            (review.head_sha.as_deref() != Some(current_head)).then_some(current_head)
+        });
+        let block = Block::default().borders(Borders::ALL).title("Review");
+        let inner = block.inner(area);
+        let (content_area, warning_area) = if stale_head.is_some() && inner.height >= 5 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3)])
+                .split(inner);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (inner, None)
+        };
+        let detail_width = usize::from(content_area.width);
         let mut lines = vec![Line::from(Span::styled(
             review.title.clone(),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ))];
-        if let Some(current_head) = current_head.as_deref() {
-            if review.head_sha.as_deref() != Some(current_head) {
-                lines.push(review_stale_head_warning_line(
-                    review.head_sha.as_deref(),
-                    current_head,
-                    detail_width,
-                ));
-            }
-        }
         lines.extend([
             field_line("Ticket", &format!("{} {}", ticket.short_id(), ticket.title)),
             field_line("Branch", &review_branch_label(&review)),
@@ -2257,7 +2262,7 @@ impl App {
             )));
         } else {
             let width = detail_width;
-            let rows_available = usize::from(area.height)
+            let rows_available = usize::from(content_area.height)
                 .saturating_sub(lines.len() + 4)
                 .max(1);
             lines.push(review_commit_summary_header(width));
@@ -2303,10 +2308,19 @@ impl App {
             }
         }
 
-        let detail = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title("Review"))
-            .wrap(Wrap { trim: false });
-        frame.render_widget(detail, area);
+        frame.render_widget(block, area);
+        if let (Some(warning_area), Some(stale_head)) = (warning_area, stale_head) {
+            frame.render_widget(
+                review_stale_head_warning(
+                    review.head_sha.as_deref(),
+                    stale_head,
+                    usize::from(warning_area.width.saturating_sub(2)),
+                ),
+                warning_area,
+            );
+        }
+        let detail = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(detail, content_area);
     }
 
     fn draw_review_commit_list_mode(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -9727,7 +9741,7 @@ fn review_stale_head_warning_line(
 ) -> Line<'static> {
     let recorded = recorded_head.map(short_hash).unwrap_or("-");
     let text = format!(
-        "Branch has new commits: review {recorded}, branch {}. Press u to update review.",
+        "Press 'u' to update review. Branch head is {}; review is at {recorded}.",
         short_hash(current_head)
     );
     Line::from(Span::styled(
@@ -9736,6 +9750,29 @@ fn review_stale_head_warning_line(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     ))
+}
+
+fn review_stale_head_warning(
+    recorded_head: Option<&str>,
+    current_head: &str,
+    width: usize,
+) -> Paragraph<'static> {
+    Paragraph::new(review_stale_head_warning_line(
+        recorded_head,
+        current_head,
+        width,
+    ))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Branch changed")
+            .border_style(Style::default().fg(Color::Yellow)),
+    )
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::Rgb(44, 36, 12)),
+    )
 }
 
 fn review_progress_graph_count(approved: usize, total: usize) -> String {
@@ -14096,6 +14133,21 @@ mod tests {
         assert!(text.contains("3/20"));
         assert!(!text.contains("rv"));
         assert!(text.contains("█"));
+    }
+
+    #[test]
+    fn review_stale_head_warning_keeps_update_hint_visible() {
+        let line = review_stale_head_warning_line(Some("1111111abcdef"), "2222222abcdef", 80);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.starts_with("Press 'u'"));
+        assert!(text.contains("1111111"));
+        assert!(text.contains("2222222"));
+        assert!(spans_width(&line.spans) <= 80);
     }
 
     #[test]
