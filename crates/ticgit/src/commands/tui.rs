@@ -1856,6 +1856,12 @@ impl App {
             block,
             issue_table_header(&columns, &widths, row_width),
         );
+        let body = render_list_hint_bar(
+            frame,
+            body,
+            items.len(),
+            "Issues: track work that needs to be done. Hit 'n' to open a new issue",
+        );
         let list = List::new(items)
             .highlight_style(list_highlight_style())
             .highlight_symbol(HIGHLIGHT_SYMBOL)
@@ -1918,6 +1924,12 @@ impl App {
                 })
                 .collect()
         };
+        let body = render_list_hint_bar(
+            frame,
+            body,
+            self.visible_writeups.len(),
+            "Writeups: create and manage long form documents that can be turned into specs",
+        );
 
         let list = List::new(items)
             .highlight_style(list_highlight_style())
@@ -1976,6 +1988,12 @@ impl App {
                 })
                 .collect()
         };
+        let body = render_list_hint_bar(
+            frame,
+            body,
+            indices.len(),
+            "Reviews: patch based review on your code",
+        );
 
         let list = List::new(items)
             .highlight_style(list_highlight_style())
@@ -5088,10 +5106,11 @@ impl App {
     }
 
     fn begin_review_branch_picker(&mut self) -> Result<()> {
-        self.review_branch_choices = load_review_branch_choices(&self.open_review_branch_names())?;
+        self.review_branch_choices =
+            load_review_branch_choices(&self.connected_review_branch_names())?;
         if self.review_branch_choices.is_empty() {
             self.review_branch_state.select(None);
-            self.status = Some("No branches without open reviews.".to_string());
+            self.status = Some("No branches without reviews.".to_string());
             return Ok(());
         }
         self.review_branch_state.select(Some(0));
@@ -6162,10 +6181,7 @@ impl App {
         };
 
         self.input = match kind {
-            InputKind::Priority => ticket
-                .and_then(|ticket| ticket.priority)
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
+            InputKind::Priority => String::new(),
             InputKind::Points => ticket
                 .and_then(|ticket| ticket.points)
                 .map(|value| value.to_string())
@@ -6899,11 +6915,15 @@ impl App {
 
     fn apply_filter(&mut self) {
         let needle = self.filter.to_ascii_lowercase();
+        let hide_review_tickets = self.hide_review_tickets_in_issue_list();
         self.visible = self
             .tickets
             .iter()
             .enumerate()
             .filter_map(|(idx, ticket)| {
+                if hide_review_tickets && ticket.state == TicketState::Review {
+                    return None;
+                }
                 if (needle.is_empty() || ticket_matches(ticket, &needle))
                     && ticket_matches_tag_filter(
                         ticket,
@@ -6928,6 +6948,12 @@ impl App {
             self.list_state.select(Some(selected));
         }
         self.apply_writeup_filter();
+    }
+
+    fn hide_review_tickets_in_issue_list(&self) -> bool {
+        self.active_tab == TuiTab::Issues
+            && self.base_status == Some(TicketStatus::Open)
+            && self.base_state.is_none()
     }
 
     fn apply_writeup_filter(&mut self) {
@@ -8358,10 +8384,9 @@ impl App {
             .map(|idx| &self.all_tickets[idx])
     }
 
-    fn open_review_branch_names(&self) -> BTreeSet<String> {
+    fn connected_review_branch_names(&self) -> BTreeSet<String> {
         self.ticket_reviews
             .values()
-            .filter(|review| !matches!(review.status.as_str(), "closed" | "merged"))
             .filter_map(|review| review.branch_name.as_deref())
             .map(str::to_string)
             .collect()
@@ -8574,6 +8599,32 @@ fn render_table_list_frame(
     chunks[1]
 }
 
+fn render_list_hint_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    item_count: usize,
+    message: &'static str,
+) -> Rect {
+    if area.height <= 1 || item_count >= usize::from(area.height) {
+        return area;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            fit_display(message, usize::from(chunks[1].width)),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )))
+        .style(Style::default().bg(Color::Rgb(24, 25, 35))),
+        chunks[1],
+    );
+    chunks[0]
+}
+
 fn list_highlight_style() -> Style {
     Style::default()
         .bg(Color::Rgb(0, 0, 95))
@@ -8712,7 +8763,7 @@ fn view_state_title(title: String) -> Line<'static> {
 }
 
 fn load_review_branch_choices(
-    open_review_branches: &BTreeSet<String>,
+    connected_review_branches: &BTreeSet<String>,
 ) -> Result<Vec<ReviewBranchChoice>> {
     let output = Command::new("but")
         .args(["branch", "list", "--json"])
@@ -8733,7 +8784,7 @@ fn load_review_branch_choices(
 
     let mut choices = branches
         .into_iter()
-        .filter(|branch| !open_review_branches.contains(&branch.name))
+        .filter(|branch| !connected_review_branches.contains(&branch.name))
         .map(|branch| ReviewBranchChoice {
             name: branch.name,
             last_commit_at: branch
@@ -9240,6 +9291,10 @@ fn short_hash(value: &str) -> &str {
     value.get(..7).unwrap_or(value)
 }
 
+fn short_hash_len(value: &str, len: usize) -> &str {
+    value.get(..len).unwrap_or(value)
+}
+
 fn read_review_commit_info_cache_file(path: &Path) -> Option<ReviewCommitInfo> {
     let bytes = fs::read(path).ok()?;
     serde_json::from_slice(&bytes).ok()
@@ -9505,16 +9560,6 @@ fn review_branch_summary_lines(
                     version.to_string(),
                     Style::default().fg(Color::Magenta),
                 ),
-                (
-                    "Head",
-                    review
-                        .head_sha
-                        .as_deref()
-                        .map(short_hash)
-                        .unwrap_or("-")
-                        .to_string(),
-                    Style::default().fg(Color::Yellow),
-                ),
             ],
             width,
         ),
@@ -9591,23 +9636,13 @@ fn review_summary_table_line<const N: usize>(
 }
 
 fn review_review_progress_line(progress: ReviewProgress, width: usize) -> Line<'static> {
-    let approved = progress_segment(
+    let mut spans = progress_segment(
         "ap",
         progress.approved,
         progress.total,
         Color::LightGreen,
-        18,
+        24.min(width.saturating_sub(8).max(8)),
     );
-    let reviewed = progress_segment(
-        "rv",
-        progress.reviewed,
-        progress.total,
-        Color::LightBlue,
-        18,
-    );
-    let mut spans = approved;
-    spans.push(Span::raw("  "));
-    spans.extend(reviewed);
     let used = spans_width(&spans);
     if used < width {
         spans.push(Span::raw(" ".repeat(width - used)));
@@ -9679,33 +9714,29 @@ fn review_authors_display(infos: &[ReviewCommitInfo]) -> String {
 }
 
 fn review_commit_table_header(width: usize) -> Line<'static> {
-    let labels = [
-        ("Status", 6),
-        ("Ver.", 5),
-        ("Name", 54),
-        ("Files", 6),
-        ("+/-", 12),
-        ("Updated", 12),
+    let widths = review_commit_table_widths(width);
+    let header_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![
+        Span::styled(fit_display("Status", widths.status), header_style),
+        Span::raw(" "),
+        Span::styled(fit_display("Ver", widths.version), header_style),
+        Span::raw(" "),
+        Span::styled(fit_display("Sha", widths.sha), header_style),
+        Span::raw(" "),
+        Span::styled(fit_display("Name", widths.subject), header_style),
+        Span::raw(" "),
+        Span::styled(
+            format!("{:>width$}", "Files", width = widths.files),
+            header_style,
+        ),
+        Span::raw(" "),
+        Span::styled(fit_display("+/-", widths.changes), header_style),
     ];
-    let mut spans = Vec::new();
-    let mut used = 0;
-    for (idx, (label, column_width)) in labels.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw(" "));
-            used += 1;
-        }
-        let remaining = width.saturating_sub(used);
-        if remaining == 0 {
-            break;
-        }
-        let column_width = (*column_width).min(remaining);
-        spans.push(Span::styled(
-            fit_display(label, column_width),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ));
-        used += column_width;
+    if let Some(updated) = widths.updated {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(fit_display("Dt", updated), header_style));
     }
     Line::from(spans)
 }
@@ -9718,6 +9749,7 @@ fn review_commit_table_line(
     status: &CommitReviewStatus,
     width: usize,
 ) -> Line<'static> {
+    let widths = review_commit_table_widths(width);
     let status_label = review_commit_verdict(review, sha, status);
     let subject = info
         .map(|info| info.subject.as_str())
@@ -9738,7 +9770,7 @@ fn review_commit_table_line(
         width,
         &status_label.0,
         status_label.1,
-        6,
+        widths.status,
     );
     push_review_table_column(
         &mut spans,
@@ -9746,7 +9778,15 @@ fn review_commit_table_line(
         width,
         &format!("v{version}"),
         Style::default().fg(Color::DarkGray),
-        5,
+        widths.version,
+    );
+    push_review_table_column(
+        &mut spans,
+        &mut used,
+        width,
+        short_hash_len(sha, widths.sha),
+        Style::default().fg(Color::Cyan),
+        widths.sha,
     );
     push_review_table_column(
         &mut spans,
@@ -9758,7 +9798,7 @@ fn review_commit_table_line(
         } else {
             Style::default().fg(Color::DarkGray)
         },
-        54,
+        widths.subject,
     );
     push_review_table_column(
         &mut spans,
@@ -9766,18 +9806,56 @@ fn review_commit_table_line(
         width,
         &stats.files.to_string(),
         Style::default().fg(Color::Magenta),
-        6,
+        widths.files,
     );
-    push_review_changes_column(&mut spans, &mut used, width, &stats, 12);
-    push_review_table_column(
-        &mut spans,
-        &mut used,
-        width,
-        updated,
-        Style::default().fg(Color::DarkGray),
-        12,
-    );
+    push_review_changes_column(&mut spans, &mut used, width, &stats, widths.changes);
+    if let Some(updated_width) = widths.updated {
+        push_review_table_column(
+            &mut spans,
+            &mut used,
+            width,
+            updated,
+            Style::default().fg(Color::DarkGray),
+            updated_width,
+        );
+    }
     Line::from(spans)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReviewCommitTableWidths {
+    status: usize,
+    version: usize,
+    sha: usize,
+    subject: usize,
+    files: usize,
+    changes: usize,
+    updated: Option<usize>,
+}
+
+fn review_commit_table_widths(width: usize) -> ReviewCommitTableWidths {
+    let status = 6;
+    let version = 3;
+    let sha = 3;
+    let files = 5;
+    let changes = 13.min(
+        width
+            .saturating_sub(status + version + sha + files + 6)
+            .max(7),
+    );
+    let updated = (width >= 48).then_some(4);
+    let separators = if updated.is_some() { 6 } else { 5 };
+    let fixed = status + version + sha + files + changes + updated.unwrap_or(0) + separators;
+    let subject = width.saturating_sub(fixed).max(1);
+    ReviewCommitTableWidths {
+        status,
+        version,
+        sha,
+        subject,
+        files,
+        changes,
+        updated,
+    }
 }
 
 fn push_review_table_column(
@@ -11102,57 +11180,28 @@ fn review_commit_line(
 }
 
 fn review_commit_summary_header(width: usize) -> Line<'static> {
-    let hash_width = 7;
-    let version_width = 4;
-    let updated_width = 4;
-    let files_width = 4;
-    let changes_width = 11;
-    let separator_count = 5;
-    let fixed_width =
-        hash_width + version_width + updated_width + files_width + changes_width + separator_count;
-    let subject_width = width.saturating_sub(fixed_width).max(1);
+    let widths = review_commit_summary_widths(width);
+    let header_style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD);
     let mut spans = vec![
+        Span::styled(fit_display("Ver", widths.version), header_style),
+        Span::raw(" "),
+        Span::styled(fit_display("Sha", widths.sha), header_style),
+        Span::raw(" "),
+        Span::styled(fit_display("Title", widths.subject), header_style),
+        Span::raw(" "),
         Span::styled(
-            fit_display("Commit", hash_width),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            format!("{:>width$}", "Dt", width = widths.updated),
+            header_style,
         ),
         Span::raw(" "),
         Span::styled(
-            fit_display("Ver", version_width),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            format!("{:>width$}", "F", width = widths.files),
+            header_style,
         ),
         Span::raw(" "),
-        Span::styled(
-            fit_display("Title", subject_width),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{:>updated_width$}", "Dt"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{:>files_width$}", "F"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            fit_display("+/-", changes_width),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(fit_display("+/-", widths.changes), header_style),
     ];
     let used = spans_width(&spans);
     if used < width {
@@ -11168,15 +11217,7 @@ fn review_commit_summary_line(
     _status: Option<&CommitReviewStatus>,
     width: usize,
 ) -> Line<'static> {
-    let hash_width = 7;
-    let version_width = 4;
-    let updated_width = 4;
-    let files_width = 4;
-    let changes_width = 11;
-    let separator_count = 5;
-    let fixed_width =
-        hash_width + version_width + updated_width + files_width + changes_width + separator_count;
-    let subject_width = width.saturating_sub(fixed_width).max(1);
+    let widths = review_commit_summary_widths(width);
     let version = format!("v{position}");
     let subject = info
         .map(|info| info.subject.as_str())
@@ -11191,17 +11232,17 @@ fn review_commit_summary_line(
         .unwrap_or_default();
     let mut spans = vec![
         Span::styled(
-            short_hash(sha).to_string(),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("{version:>version_width$}"),
+            format!("{version:>width$}", width = widths.version),
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(" "),
         Span::styled(
-            fit_display(subject, subject_width),
+            fit_display(short_hash_len(sha, widths.sha), widths.sha),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            fit_display(subject, widths.subject),
             if info.is_some() {
                 Style::default()
             } else {
@@ -11210,18 +11251,54 @@ fn review_commit_summary_line(
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:>updated_width$}", fit_display(updated, updated_width)),
+            format!(
+                "{:>width$}",
+                fit_display(updated, widths.updated),
+                width = widths.updated
+            ),
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("{:>files_width$}", stats.files),
+            format!("{:>width$}", stats.files, width = widths.files),
             Style::default().fg(Color::Magenta),
         ),
         Span::raw(" "),
     ];
-    spans.extend(review_change_spans(&stats, changes_width));
+    spans.extend(review_change_spans(&stats, widths.changes));
     Line::from(spans)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReviewCommitSummaryWidths {
+    version: usize,
+    sha: usize,
+    subject: usize,
+    updated: usize,
+    files: usize,
+    changes: usize,
+}
+
+fn review_commit_summary_widths(width: usize) -> ReviewCommitSummaryWidths {
+    let version = 3;
+    let sha = 3;
+    let updated = 4;
+    let files = 3;
+    let changes = 13.min(
+        width
+            .saturating_sub(version + sha + updated + files + 5)
+            .max(7),
+    );
+    let fixed = version + sha + updated + files + changes + 5;
+    let subject = width.saturating_sub(fixed).max(1);
+    ReviewCommitSummaryWidths {
+        version,
+        sha,
+        subject,
+        updated,
+        files,
+        changes,
+    }
 }
 
 fn review_status_style(status: &str) -> Style {
@@ -11463,8 +11540,8 @@ fn issue_columns_for_width(columns: &[IssueColumn], width: usize) -> Vec<IssueCo
         IssueColumn::Milestone,
         IssueColumn::Points,
         IssueColumn::Assignee,
-        IssueColumn::Priority,
         IssueColumn::State,
+        IssueColumn::Priority,
         IssueColumn::Date,
         IssueColumn::Closed,
         IssueColumn::Id,
@@ -13478,11 +13555,22 @@ mod tests {
             IssueColumn::Id,
             IssueColumn::Closed,
             IssueColumn::Priority,
+            IssueColumn::State,
             IssueColumn::Title,
             IssueColumn::Tags,
         ];
 
         assert_eq!(issue_columns_for_width(&columns, 80), columns);
+        assert_eq!(
+            issue_columns_for_width(&columns, 46),
+            vec![
+                IssueColumn::Id,
+                IssueColumn::Closed,
+                IssueColumn::Priority,
+                IssueColumn::State,
+                IssueColumn::Title
+            ]
+        );
         assert_eq!(
             issue_columns_for_width(&columns, 43),
             vec![
@@ -13686,9 +13774,32 @@ mod tests {
 
         assert!(!text.contains("rv"));
         assert!(!text.contains("ap"));
-        assert!(text.contains("Commit"));
+        assert!(text.contains("Sha"));
         assert!(text.contains("+/-"));
         assert!(spans_width(&header.spans) <= 78);
+    }
+
+    #[test]
+    fn review_commit_summary_line_keeps_short_sha_and_changes() {
+        let info = ReviewCommitInfo {
+            subject: "Add parser checks".to_string(),
+            updated: "7m".to_string(),
+            shortstat: "3 files changed, 102 insertions(+), 2 deletions(-)".to_string(),
+            ..ReviewCommitInfo::default()
+        };
+        let line = review_commit_summary_line(2, "abcdef123456", Some(&info), None, 72);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("v2"));
+        assert!(text.contains("abc"));
+        assert!(!text.contains("abcdef1"));
+        assert!(text.contains("+102"));
+        assert!(text.contains("-2"));
+        assert!(spans_width(&line.spans) <= 72);
     }
 
     #[test]
@@ -13708,8 +13819,8 @@ mod tests {
             .collect::<String>();
 
         assert!(spans_width(&line.spans) <= 78);
-        assert!(text.contains("rv 5/20"));
         assert!(text.contains("ap 3/20"));
+        assert!(!text.contains("rv"));
         assert!(text.contains("█"));
     }
 
@@ -13956,7 +14067,7 @@ mod tests {
         assert!(text.contains("Branch  : review-cli (review-cli@123)"));
         assert!(text.contains("Ticket  : 000"));
         assert!(text.contains("Status  : open"));
-        assert!(text.contains("Head    : abcdef1"));
+        assert!(!text.contains("Head"));
         assert!(text.contains("Desc    : Review branch description"));
     }
 
