@@ -155,6 +155,8 @@ struct ReviewMessage {
     path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     lines: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +352,7 @@ fn comment(args: CommentArgs) -> Result<()> {
             commit: args.commit,
             path: args.path,
             lines,
+            at: None,
         },
     )?;
     println!("Added comment to {}", review.branch_id);
@@ -385,6 +388,7 @@ fn approve(args: ApproveArgs) -> Result<()> {
                 commit,
                 path: None,
                 lines: None,
+                at: None,
             },
         )?;
         println!("Approved {}", review.branch_id);
@@ -412,6 +416,7 @@ fn request_changes(args: RequestChangesArgs) -> Result<()> {
             commit: None,
             path: None,
             lines: None,
+            at: None,
         },
     )?;
     println!("Requested changes on {}", review.branch_id);
@@ -513,8 +518,11 @@ fn index_review(store: &ticgit_lib::TicketStore, branch_id: &str) -> Result<()> 
 fn append_message(
     store: &ticgit_lib::TicketStore,
     branch_id: &str,
-    message: ReviewMessage,
+    mut message: ReviewMessage,
 ) -> Result<()> {
+    if message.at.is_none() {
+        message.at = Some(now_rfc3339()?);
+    }
     let json = serde_json::to_string(&message)?;
     store
         .session()
