@@ -1,5 +1,7 @@
 use std::env;
 use std::fs;
+use std::io;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -62,11 +64,51 @@ pub fn run(args: Args) -> Result<()> {
     let new_binary = tmp.path().join("ti");
     let current_binary = env::current_exe().context("finding current binary path")?;
 
-    // Replace the running binary
-    fs::copy(&new_binary, &current_binary)
+    replace_current_binary(&new_binary, &current_binary)
         .context("replacing binary — you may need to run with sudo")?;
 
     println!("Updated to v{latest}.");
+    Ok(())
+}
+
+fn replace_current_binary(new_binary: &Path, current_binary: &Path) -> Result<()> {
+    let parent = current_binary
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("current binary path has no parent"))?;
+    let current_permissions = fs::metadata(current_binary)
+        .with_context(|| format!("reading permissions for {}", current_binary.display()))?
+        .permissions();
+
+    let mut source = fs::File::open(new_binary)
+        .with_context(|| format!("opening new binary {}", new_binary.display()))?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".ti-update-")
+        .tempfile_in(parent)
+        .with_context(|| format!("creating staged binary in {}", parent.display()))?;
+
+    io::copy(&mut source, staged.as_file_mut())
+        .with_context(|| format!("staging new binary {}", new_binary.display()))?;
+    staged
+        .as_file_mut()
+        .sync_all()
+        .context("flushing staged binary")?;
+    fs::set_permissions(staged.path(), current_permissions).with_context(|| {
+        format!(
+            "setting staged binary permissions for {}",
+            staged.path().display()
+        )
+    })?;
+
+    let staged_path = staged.into_temp_path();
+    let staged_path_ref: &Path = staged_path.as_ref();
+    fs::rename(staged_path_ref, current_binary).with_context(|| {
+        format!(
+            "atomically replacing {} with {}",
+            current_binary.display(),
+            staged_path.display()
+        )
+    })?;
+
     Ok(())
 }
 
@@ -116,4 +158,52 @@ fn detect_target() -> Result<String> {
     };
 
     Ok(format!("{arch_target}-{os_target}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_current_binary_swaps_contents_and_preserves_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let current = tmp.path().join("ti");
+        let next = tmp.path().join("new-ti");
+
+        fs::write(&current, "old").unwrap();
+        fs::write(&next, "new").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&current).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&current, permissions).unwrap();
+        }
+
+        replace_current_binary(&next, &current).unwrap();
+
+        assert_eq!(fs::read_to_string(&current).unwrap(), "new");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(&current).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o755);
+        }
+
+        let leftovers = fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".ti-update-")
+            })
+            .count();
+        assert_eq!(leftovers, 0);
+    }
 }
