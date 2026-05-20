@@ -6014,7 +6014,13 @@ impl App {
             .branch_name
             .clone()
             .unwrap_or_else(|| review.branch_id.clone());
-        let snapshot = load_review_branch_snapshot(&branch_name)?;
+        let snapshot = match load_review_branch_snapshot(&branch_name) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.status = Some(format!("Could not load branch {branch_name}: {err:#}"));
+                return Ok(());
+            }
+        };
         if snapshot.head_sha.is_empty() {
             self.status = Some(format!("Could not resolve head for {branch_name}."));
             return Ok(());
@@ -7928,7 +7934,13 @@ impl App {
             return Ok(false);
         };
 
-        let snapshot = load_review_branch_snapshot(&choice.name)?;
+        let snapshot = match load_review_branch_snapshot(&choice.name) {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                self.status = Some(format!("Could not load branch {}: {err:#}", choice.name));
+                return Ok(false);
+            }
+        };
         let title = review_ticket_title(&choice.name, &snapshot);
         let ticket = self.store.create(
             &title,
@@ -8837,10 +8849,7 @@ fn load_review_branch_choices(
         .output()
         .with_context(|| "running but branch list --json")?;
     if !output.status.success() {
-        anyhow::bail!(
-            "but branch list --json failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        return load_git_review_branch_choices(connected_review_branches);
     }
     let branch_list: ButBranchList =
         serde_json::from_slice(&output.stdout).with_context(|| "parsing but branch list --json")?;
@@ -8861,6 +8870,7 @@ fn load_review_branch_choices(
             author: branch_author_display(branch.last_author),
         })
         .collect::<Vec<_>>();
+    fill_missing_review_branch_commits_ahead(&mut choices);
     choices.sort_by(|a, b| {
         b.last_commit_at
             .cmp(&a.last_commit_at)
@@ -8869,6 +8879,119 @@ fn load_review_branch_choices(
     let mut seen = BTreeSet::new();
     choices.retain(|choice| seen.insert(choice.name.clone()));
     Ok(choices)
+}
+
+fn load_git_review_branch_choices(
+    connected_review_branches: &BTreeSet<String>,
+) -> Result<Vec<ReviewBranchChoice>> {
+    let output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname:short)%09%(committerdate:unix)%09%(authorname)%09%(authoremail)",
+            "refs/heads",
+            "refs/remotes",
+        ])
+        .output()
+        .with_context(|| "running git for-each-ref")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git for-each-ref failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    parse_git_review_branch_choices(connected_review_branches, &output.stdout)
+}
+
+fn parse_git_review_branch_choices(
+    connected_review_branches: &BTreeSet<String>,
+    stdout: &[u8],
+) -> Result<Vec<ReviewBranchChoice>> {
+    let mut choices = String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| git_review_branch_choice_from_ref_line(connected_review_branches, line))
+        .collect::<Vec<_>>();
+    fill_missing_review_branch_commits_ahead(&mut choices);
+    choices.sort_by(|a, b| {
+        b.last_commit_at
+            .cmp(&a.last_commit_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let mut seen = BTreeSet::new();
+    choices.retain(|choice| seen.insert(choice.name.clone()));
+    Ok(choices)
+}
+
+fn git_review_branch_choice_from_ref_line(
+    connected_review_branches: &BTreeSet<String>,
+    line: &str,
+) -> Option<ReviewBranchChoice> {
+    let mut fields = line.split('\t');
+    let name = fields.next()?.trim();
+    if !is_reviewable_git_branch_name(name) || connected_review_branches.contains(name) {
+        return None;
+    }
+    let last_commit_at = fields
+        .next()
+        .and_then(|timestamp| timestamp.parse::<i64>().ok())
+        .and_then(|timestamp| OffsetDateTime::from_unix_timestamp(timestamp).ok());
+    let author_name = fields.next().unwrap_or_default().trim();
+    let author_email = fields
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>');
+    Some(ReviewBranchChoice {
+        name: name.to_string(),
+        last_commit_at,
+        commits_ahead: None,
+        author: if !author_name.is_empty() {
+            author_name.to_string()
+        } else if !author_email.is_empty() {
+            author_email.to_string()
+        } else {
+            "-".to_string()
+        },
+    })
+}
+
+fn is_reviewable_git_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "HEAD"
+        && name != "origin"
+        && name != "main"
+        && name != "master"
+        && name != "origin/main"
+        && name != "origin/master"
+        && !name.ends_with("/HEAD")
+        && !name.starts_with("gitbutler/")
+        && !name.starts_with("meta/")
+}
+
+fn fill_missing_review_branch_commits_ahead(choices: &mut [ReviewBranchChoice]) {
+    for choice in choices {
+        if choice.commits_ahead.is_none() {
+            choice.commits_ahead = review_commits_ahead_of_target(&choice.name);
+        }
+    }
+}
+
+fn review_commits_ahead_of_target(branch_name: &str) -> Option<i64> {
+    let target = default_review_base_ref();
+    let branch = resolve_review_branch_ref(branch_name).ok()?;
+    let range = format!("{target}..{}", branch.name);
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &range])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_git_commit_count(&output.stdout)
+}
+
+fn parse_git_commit_count(stdout: &[u8]) -> Option<i64> {
+    String::from_utf8_lossy(stdout).trim().parse().ok()
 }
 
 fn branch_author_display(author: Option<ButAuthor>) -> String {
@@ -8887,8 +9010,9 @@ fn load_review_branch_snapshot(branch_name: &str) -> Result<ReviewBranchSnapshot
         return parse_review_branch_snapshot(branch_name, &output.stdout);
     }
 
-    let base_sha = review_base_sha(branch_name)?;
-    let head_sha = resolve_git_ref(branch_name).or_else(|_| resolve_git_ref("HEAD"))?;
+    let branch_ref = resolve_review_branch_ref(branch_name)?;
+    let base_sha = review_base_sha(&branch_ref.name)?;
+    let head_sha = branch_ref.sha;
     let commits = review_revision_list(&base_sha, &head_sha)?;
     Ok(ReviewBranchSnapshot {
         base_sha,
@@ -8896,6 +9020,40 @@ fn load_review_branch_snapshot(branch_name: &str) -> Result<ReviewBranchSnapshot
         commits,
         title: review_commit_info(&head_sha).subject,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedReviewBranchRef {
+    name: String,
+    sha: String,
+}
+
+fn resolve_review_branch_ref(branch_name: &str) -> Result<ResolvedReviewBranchRef> {
+    let mut candidates = vec![branch_name.to_string()];
+    if !branch_name.starts_with("origin/") && !branch_name.starts_with("refs/") {
+        candidates.push(format!("origin/{branch_name}"));
+    }
+    let mut last_error = None;
+    for candidate in candidates {
+        match resolve_git_ref(&candidate) {
+            Ok(sha) => {
+                return Ok(ResolvedReviewBranchRef {
+                    name: candidate,
+                    sha,
+                });
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+    if let Some(err) = last_error {
+        Err(err).with_context(|| {
+            format!(
+                "could not resolve review branch `{branch_name}`; GitButler branch data was unavailable and no Git ref with that name exists"
+            )
+        })
+    } else {
+        anyhow::bail!("could not resolve empty review branch")
+    }
 }
 
 fn parse_review_branch_snapshot(branch_name: &str, json: &[u8]) -> Result<ReviewBranchSnapshot> {
@@ -14850,6 +15008,52 @@ mod tests {
             ]
         );
         assert_eq!(snapshot.title, "Add branch picker");
+    }
+
+    #[test]
+    fn git_review_branch_choices_filter_workspace_and_connected_branches() {
+        let connected = BTreeSet::from(["review-cli".to_string()]);
+        let refs = b"gitbutler/workspace\t1779261511\tGitButler\t<gitbutler@gitbutler.com>\n\
+master\t1778595979\tScott Chacon\t<schacon@gmail.com>\n\
+review-cli\t1779106266\tScott Chacon\t<schacon@gmail.com>\n\
+origin/review-cli\t1779106267\tScott Chacon\t<schacon@gmail.com>\n\
+feature\t1779106268\tDev\t<dev@example.com>\n\
+meta/tickets\t1779106269\tMeta\t<meta@example.com>\n";
+
+        let choices = parse_git_review_branch_choices(&connected, refs).unwrap();
+
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].name, "feature");
+        assert_eq!(choices[0].author, "Dev");
+        assert_eq!(choices[1].name, "origin/review-cli");
+    }
+
+    #[test]
+    fn reviewable_git_branch_names_skip_workspace_and_base_refs() {
+        for name in [
+            "gitbutler/workspace",
+            "gitbutler/edit",
+            "gitbutler/target",
+            "meta/review-cli",
+            "origin/HEAD",
+            "origin",
+            "main",
+            "master",
+            "origin/main",
+            "origin/master",
+        ] {
+            assert!(!is_reviewable_git_branch_name(name), "{name}");
+        }
+
+        assert!(is_reviewable_git_branch_name("feature/review-updater"));
+        assert!(is_reviewable_git_branch_name("origin/review-cli"));
+    }
+
+    #[test]
+    fn parse_git_commit_count_reads_rev_list_count() {
+        assert_eq!(parse_git_commit_count(b"12\n"), Some(12));
+        assert_eq!(parse_git_commit_count(b""), None);
+        assert_eq!(parse_git_commit_count(b"not-a-count\n"), None);
     }
 
     fn test_ticket(id: uuid::Uuid, parent: Option<uuid::Uuid>, children: &[uuid::Uuid]) -> Ticket {

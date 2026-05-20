@@ -234,7 +234,7 @@ fn new(args: NewArgs) -> Result<()> {
     let base_ref = args.base.unwrap_or_else(default_base_ref);
     let base_sha =
         resolve_ref(&base_ref).unwrap_or_else(|_| resolve_ref("HEAD").unwrap_or_default());
-    let head_sha = resolve_ref(&branch_name).or_else(|_| resolve_ref("HEAD"))?;
+    let head_sha = resolve_review_branch_head(&branch_name)?;
     let now = now_rfc3339()?;
     let target = store.session().target(&Target::branch(&branch_id));
     let mut title = args.title.unwrap_or_else(|| branch_name.clone());
@@ -717,7 +717,7 @@ fn update(args: UpdateArgs) -> Result<()> {
         string_value(target.get_value("code:branch")?).unwrap_or_else(|| review.branch_id.clone());
     let head = match args.head {
         Some(head) => resolve_ref(&head).unwrap_or(head),
-        None => resolve_ref(&branch).or_else(|_| resolve_ref("HEAD"))?,
+        None => resolve_review_branch_head(&branch)?,
     };
     let base = string_value(target.get_value("base:sha")?).unwrap_or_default();
     target.set("head:sha", head.as_str())?;
@@ -1018,6 +1018,29 @@ fn default_base_ref() -> String {
 
 fn resolve_ref(reference: &str) -> Result<String> {
     git_output(&["rev-parse", reference])
+}
+
+fn resolve_review_branch_head(branch_name: &str) -> Result<String> {
+    let mut candidates = vec![branch_name.to_string()];
+    if !branch_name.starts_with("origin/") && !branch_name.starts_with("refs/") {
+        candidates.push(format!("origin/{branch_name}"));
+    }
+    let mut last_error = None;
+    for candidate in candidates {
+        match resolve_ref(&candidate) {
+            Ok(sha) => return Ok(sha),
+            Err(err) => last_error = Some(err),
+        }
+    }
+    if let Some(err) = last_error {
+        Err(err).with_context(|| {
+            format!(
+                "could not resolve review branch `{branch_name}`; no Git ref with that name exists"
+            )
+        })
+    } else {
+        bail!("could not resolve empty review branch")
+    }
 }
 
 fn remote_url() -> Result<Option<String>> {
