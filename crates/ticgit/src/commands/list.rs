@@ -244,7 +244,7 @@ fn terminal_table_limit(total: usize) -> usize {
 }
 
 fn table_limit_for_rows(total: usize, rows: usize) -> usize {
-    let reserved = if total > rows.saturating_sub(2) { 3 } else { 2 };
+    let reserved = if total > rows.saturating_sub(7) { 8 } else { 7 };
     rows.saturating_sub(reserved).max(1)
 }
 
@@ -261,8 +261,8 @@ mod tests {
 
     #[test]
     fn table_limit_reserves_footer_only_when_rows_are_omitted() {
-        assert_eq!(table_limit_for_rows(3, 10), 8);
-        assert_eq!(table_limit_for_rows(10, 10), 7);
+        assert_eq!(table_limit_for_rows(3, 10), 3);
+        assert_eq!(table_limit_for_rows(10, 10), 2);
         assert_eq!(table_limit_for_rows(10, 2), 1);
     }
 }
