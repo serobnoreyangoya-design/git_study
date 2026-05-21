@@ -13086,7 +13086,6 @@ fn default_issue_columns() -> Vec<IssueColumn> {
     vec![
         IssueColumn::Id,
         IssueColumn::Date,
-        IssueColumn::State,
         IssueColumn::Priority,
         IssueColumn::Title,
         IssueColumn::Tags,
@@ -13982,6 +13981,21 @@ mod tests {
                 IssueColumn::Title
             ]
         );
+    }
+
+    #[test]
+    fn default_issue_columns_omit_state_column() {
+        assert_eq!(
+            default_issue_columns(),
+            vec![
+                IssueColumn::Id,
+                IssueColumn::Date,
+                IssueColumn::Priority,
+                IssueColumn::Title,
+                IssueColumn::Tags
+            ]
+        );
+        assert!(ISSUE_COLUMN_CHOICES.contains(&IssueColumn::State));
     }
 
     #[test]
